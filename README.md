@@ -17,6 +17,9 @@ than in vscode terminal just run:
 docker compose up --build
 open locallhost
 
+email admin@gmail.com
+password admin 
+
 For local backend development, start the database first with `docker compose up -d db`, then run `backend\.venv\Scripts\python.exe backend\manage.py runserver`. for testing `backend python manage.py test` or `.\.venv\Scripts\python.exe manage.py test core  ` The default local database port is `5433`, matching `docker-compose.yml`.
 
 ## Implemented Scope
