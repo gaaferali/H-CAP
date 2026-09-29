@@ -6,22 +6,6 @@ from django.db import models
 from django.utils import timezone as django_timezone
 
 
-class AutomationRule(models.Model):
-    name = models.CharField(max_length=255)
-    is_active = models.BooleanField(default=True)
-    created_at = models.DateTimeField(auto_now_add=True)
-
-    def __str__(self):
-        return self.name
-
-class ReconciliationItem(models.Model):
-    status = models.CharField(max_length=50, default="PENDING")
-    amount = models.DecimalField(max_digits=12, decimal_places=2, default=0.00)
-    created_at = models.DateTimeField(auto_now_add=True)
-
-    def __str__(self):
-        return f"Item {self.id} - {self.status}"
-
 class Tenant(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     name = models.CharField(max_length=255)
@@ -287,6 +271,34 @@ class Complaint(models.Model):
     created_at = models.DateTimeField(default=django_timezone.now)
 
 
+class ComplaintAIAnalysis(models.Model):
+    """Explainable AI-assisted analysis of a complaint. Human review remains authoritative."""
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    complaint = models.OneToOneField(Complaint, on_delete=models.CASCADE, related_name="ai_analysis")
+    tenant = models.ForeignKey(Tenant, on_delete=models.PROTECT, related_name="complaint_ai_analyses")
+    category = models.CharField(max_length=120)
+    severity = models.CharField(max_length=20)
+    summary = models.TextField()
+    possible_causes = models.JSONField(default=list, blank=True)
+    recommended_actions = models.JSONField(default=list, blank=True)
+    evidence = models.JSONField(default=dict, blank=True)
+    confidence = models.DecimalField(max_digits=5, decimal_places=4, default=0)
+    model_version = models.CharField(max_length=80, default="complaint-rules-v1")
+    requires_escalation = models.BooleanField(default=False)
+    reviewer_decision = models.CharField(max_length=30, blank=True)
+    reviewer_note = models.TextField(blank=True)
+    reviewed_by = models.ForeignKey(User, on_delete=models.PROTECT, null=True, blank=True, related_name="reviewed_complaint_ai_analyses")
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(default=django_timezone.now)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        constraints = [
+            models.UniqueConstraint(fields=["complaint", "tenant"], name="unique_complaint_ai_analysis_per_tenant")
+        ]
+
+
 class Budget(models.Model):
     class Status(models.TextChoices):
         DRAFT = "DRAFT", "Draft"
@@ -433,6 +445,31 @@ class ReviewTask(models.Model):
     resolution = models.TextField(blank=True)
     created_at = models.DateTimeField(default=django_timezone.now)
     resolved_at = models.DateTimeField(null=True, blank=True)
+
+
+class SyncOperation(models.Model):
+    class Status(models.TextChoices):
+        APPLIED = "APPLIED", "Applied"
+        DUPLICATE = "DUPLICATE", "Duplicate"
+        CONFLICT = "CONFLICT", "Conflict"
+        REJECTED = "REJECTED", "Rejected"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    tenant = models.ForeignKey(Tenant, on_delete=models.PROTECT, related_name="sync_operations")
+    operation_id = models.CharField(max_length=160)
+    operation_type = models.CharField(max_length=80)
+    client_generated_id = models.CharField(max_length=160, blank=True)
+    status = models.CharField(max_length=20, choices=Status.choices, default=Status.APPLIED)
+    request_hash = models.CharField(max_length=64, blank=True)
+    validation_results = models.JSONField(default=dict, blank=True)
+    error_message = models.TextField(blank=True)
+    created_at = models.DateTimeField(default=django_timezone.now)
+    processed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        constraints = [models.UniqueConstraint(fields=["tenant", "operation_id"], name="unique_sync_operation_per_tenant")]
+
 
 
 class AutomationRule(models.Model):

@@ -17,6 +17,7 @@ from .models import (
     Program,
     ReconciliationItem,
     ReviewTask,
+    SyncOperation,
     Tenant,
     User,
 )
@@ -39,3 +40,5 @@ admin.site.register(ReconciliationItem)
 admin.site.register(ReviewTask)
 admin.site.register(AutomationRule)
 admin.site.register(AutomationExecution)
+
+admin.site.register(SyncOperation)

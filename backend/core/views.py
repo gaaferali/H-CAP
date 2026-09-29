@@ -1,5 +1,6 @@
 import uuid
 import json
+import hashlib
 
 from django.contrib.auth import login
 from django.core.serializers.json import DjangoJSONEncoder
@@ -12,10 +13,14 @@ from rest_framework import status, viewsets
 from rest_framework.decorators import action, api_view, permission_classes
 from rest_framework.exceptions import PermissionDenied, ValidationError
 from rest_framework.permissions import AllowAny, IsAuthenticated
-from rest_framework.views import exception_handler
 from rest_framework.response import Response
+from rest_framework.views import exception_handler
 
-from .services import run_deduplication_check, run_automated_reconciliation, run_anomaly_detection
+from rest_framework.decorators import api_view
+from rest_framework.response import Response
+from rest_framework import status
+from .services import (run_deduplication_check, run_automated_reconciliation, run_anomaly_detection, run_data_quality_check, validate_synced_registration, process_automation_event, AICopilotService)
+from .complaint_ai import analyze_complaint
 from .models import (
     AISignal,
     AuditEvent,
@@ -24,6 +29,7 @@ from .models import (
     Beneficiary,
     Budget,
     Complaint,
+    ComplaintAIAnalysis,
     Enrollment,
     Household,
     PaymentChannelConfig,
@@ -33,6 +39,7 @@ from .models import (
     Program,
     ReconciliationItem,
     ReviewTask,
+    SyncOperation,
     User,
 )
 from .serializers import (
@@ -43,6 +50,7 @@ from .serializers import (
     BeneficiarySerializer,
     BudgetSerializer,
     ComplaintSerializer,
+    ComplaintAIAnalysisSerializer,
     EnrollmentSerializer,
     HouseholdSerializer,
     LoginSerializer,
@@ -53,6 +61,7 @@ from .serializers import (
     ProgramSerializer,
     ReconciliationItemSerializer,
     ReviewTaskSerializer,
+    SyncOperationSerializer,
     UserSerializer,
 )
 
@@ -339,6 +348,21 @@ class AutomationRuleViewSet(TenantScopedModelViewSet):
 class AutomationExecutionViewSet(TenantScopedModelViewSet):
     queryset = AutomationExecution.objects.select_related("rule")
     serializer_class = AutomationExecutionSerializer
+    http_method_names = ["get", "head", "options"]
+
+
+class SyncOperationViewSet(viewsets.ReadOnlyModelViewSet):
+    queryset = SyncOperation.objects.all()
+    serializer_class = SyncOperationSerializer
+    allowed_roles = {User.Role.ADMIN, User.Role.FIELD_OFFICER, User.Role.MANAGER, User.Role.AUDITOR}
+
+    def initial(self, request, *args, **kwargs):
+        super().initial(request, *args, **kwargs)
+        if request.user.role not in self.allowed_roles:
+            raise PermissionDenied("Your role does not have permission to view sync operations")
+
+    def get_queryset(self):
+        return SyncOperation.objects.filter(tenant=self.request.user.tenant)
 
 
 class AuditEventViewSet(viewsets.ReadOnlyModelViewSet):
@@ -374,6 +398,7 @@ def reports_view(request):
             "complaints": list(complaints.values("status").annotate(count=Count("id")).order_by("status")),
             "operational_exceptions": payments.filter(Q(status=PaymentInstruction.Status.FAILED) | Q(complaints__isnull=False)).distinct().count(),
             "program_kpis": list(programs.values("id", "name", "country", "currency", "status").annotate(enrollments=Count("enrollments"))),
+            "ai_copilot": AICopilotService.generate_system_summary_report(tenant=tenant),
         }
     })
 
@@ -413,6 +438,79 @@ def imports_view(request):
     }, status=status.HTTP_202_ACCEPTED)
 
 
+@api_view(["POST"])
+def analyze_complaint_api(request, complaint_id):
+    """Run explainable complaint analysis; source complaint remains unchanged."""
+    if request.user.role not in {User.Role.ADMIN, User.Role.SUPPORT, User.Role.MANAGER, User.Role.REVIEWER}:
+        raise PermissionDenied("Your role does not have permission to analyze complaints")
+    complaint = get_object_or_404(
+        Complaint.objects.select_related("beneficiary__household__program", "instruction"),
+        id=complaint_id,
+        beneficiary__household__tenant=request.user.tenant,
+    )
+    analysis = analyze_complaint(complaint, actor=request.user)
+    return Response(ComplaintAIAnalysisSerializer(analysis).data, status=status.HTTP_200_OK)
+
+
+@api_view(["GET"])
+def complaint_ai_analysis_api(request, complaint_id):
+    if request.user.role not in {User.Role.ADMIN, User.Role.SUPPORT, User.Role.MANAGER, User.Role.REVIEWER, User.Role.AUDITOR}:
+        raise PermissionDenied("Your role does not have permission to view complaint AI analysis")
+    complaint = get_object_or_404(
+        Complaint.objects.select_related("beneficiary__household"),
+        id=complaint_id,
+        beneficiary__household__tenant=request.user.tenant,
+    )
+    analysis = get_object_or_404(ComplaintAIAnalysis, complaint=complaint, tenant=request.user.tenant)
+    return Response(ComplaintAIAnalysisSerializer(analysis).data)
+
+
+
+@api_view(["POST"])
+def complaint_ai_review_api(request, complaint_id):
+    if request.user.role not in {User.Role.ADMIN, User.Role.SUPPORT, User.Role.MANAGER, User.Role.REVIEWER}:
+        raise PermissionDenied("Your role does not have permission to review complaint AI analysis")
+    complaint = get_object_or_404(Complaint, id=complaint_id, beneficiary__household__tenant=request.user.tenant)
+    analysis = get_object_or_404(ComplaintAIAnalysis, complaint=complaint, tenant=request.user.tenant)
+    decision = request.data.get("decision")
+    if decision not in {"ACCEPT", "MODIFY", "DISMISS"}:
+        raise ValidationError({"decision": "Use ACCEPT, MODIFY, or DISMISS"})
+    analysis.reviewer_decision = decision
+    analysis.reviewer_note = request.data.get("reviewer_note", "")
+    analysis.reviewed_by = request.user
+    analysis.reviewed_at = timezone.now()
+    analysis.save(update_fields=["reviewer_decision", "reviewer_note", "reviewed_by", "reviewed_at", "updated_at"])
+    signal = AISignal.objects.filter(tenant=request.user.tenant, entity_type="Complaint", entity_id=str(complaint.id), signal_type="COMPLAINT_INTELLIGENCE", status=AISignal.Status.OPEN).first()
+    if signal:
+        signal.status = AISignal.Status.DISMISSED if decision == "DISMISS" else AISignal.Status.ACCEPTED if decision == "ACCEPT" else AISignal.Status.REVIEWED
+        signal.reviewed_by = request.user
+        signal.reviewed_at = timezone.now()
+        signal.review_note = analysis.reviewer_note
+        signal.save(update_fields=["status", "reviewed_by", "reviewed_at", "review_note"])
+    ReviewTask.objects.filter(tenant=request.user.tenant, entity_type="Complaint", entity_id=str(complaint.id), task_type=ReviewTask.TaskType.COMPLAINT_ESCALATION, status__in=[ReviewTask.Status.OPEN, ReviewTask.Status.ASSIGNED]).update(status=ReviewTask.Status.RESOLVED, resolution=f"AI analysis reviewed by {request.user.full_name}: {decision}", resolved_at=timezone.now())
+    audit(request.user, "COMPLAINT_AI_REVIEWED", analysis, after={"decision": decision, "reviewer_note": analysis.reviewer_note})
+    return Response(ComplaintAIAnalysisSerializer(analysis).data)
+
+
+@api_view(["POST"])
+def analyze_complaints_bulk_api(request):
+    """Analyze all open/in-progress complaints, optionally limited to a program."""
+    if request.user.role not in {User.Role.ADMIN, User.Role.SUPPORT, User.Role.MANAGER, User.Role.REVIEWER}:
+        raise PermissionDenied("Your role does not have permission to analyze complaints")
+    qs = Complaint.objects.select_related("beneficiary__household__program", "instruction").filter(
+        beneficiary__household__tenant=request.user.tenant,
+        status__in=[Complaint.Status.OPEN, Complaint.Status.IN_PROGRESS],
+    )
+    program_id = request.data.get("program_id")
+    if program_id:
+        qs = qs.filter(beneficiary__household__program_id=program_id)
+    limit = min(int(request.data.get("limit", 100)), 500)
+    results = []
+    for complaint in qs.order_by("created_at")[:limit]:
+        results.append(ComplaintAIAnalysisSerializer(analyze_complaint(complaint, actor=request.user)).data)
+    return Response({"analyzed": len(results), "results": results})
+
+
 @api_view(["GET", "POST"])
 def pdm_view(request):
     if request.user.role not in {User.Role.ADMIN, User.Role.SUPPORT, User.Role.FIELD_OFFICER, User.Role.MANAGER}:
@@ -443,89 +541,114 @@ def pdm_summary_view(request):
 
 @api_view(["POST"])
 def registration_sync_view(request):
+    """Idempotent offline registration sync with post-sync validation."""
     if request.user.role not in {User.Role.ADMIN, User.Role.FIELD_OFFICER}:
         raise PermissionDenied("Only field officers and administrators can synchronize registrations")
+    operation_id = request.data.get("operation_id") or request.data.get("idempotency_key")
     program_id = request.data.get("program_id")
     household_data = request.data.get("household", request.data)
     client_generated_id = household_data.get("client_generated_id")
+    if not operation_id:
+        raise ValidationError({"operation_id": "Required for offline sync idempotency"})
     if not program_id or not client_generated_id:
         raise ValidationError({"program_id": "Required", "client_generated_id": "Required"})
+    canonical = json.dumps(request.data, sort_keys=True, default=str, separators=(",", ":"))
+    request_hash = hashlib.sha256(canonical.encode()).hexdigest()
+    existing = SyncOperation.objects.filter(tenant=request.user.tenant, operation_id=operation_id).first()
+    if existing:
+        if existing.request_hash != request_hash:
+            existing.status = SyncOperation.Status.REJECTED
+            existing.error_message = "Same operation_id was received with different payload."
+            existing.save(update_fields=["status", "error_message"])
+            raise ValidationError({"operation_id": "Idempotency conflict: payload differs from the original operation."})
+        return Response({"status": "duplicate", "operation_id": operation_id, "sync_status": existing.status, "validation_results": existing.validation_results})
 
     program = get_object_or_404(Program, id=program_id, tenant=request.user.tenant)
+    sync = SyncOperation.objects.create(tenant=request.user.tenant, operation_id=operation_id, operation_type="REGISTRATION_SYNC", client_generated_id=client_generated_id, request_hash=request_hash)
     household, household_created = Household.objects.get_or_create(
-        tenant=request.user.tenant,
-        client_generated_id=client_generated_id,
-        defaults={
-            "program": program,
-            "household_size": household_data.get("household_size", 1),
-            "location": household_data.get("location", "Unspecified"),
-            "registration_date": household_data.get("registration_date") or timezone.localdate(),
-            "created_by": request.user,
-        },
+        tenant=request.user.tenant, client_generated_id=client_generated_id,
+        defaults={"program": program, "household_size": household_data.get("household_size", 1), "location": household_data.get("location", "Unspecified"), "registration_date": household_data.get("registration_date") or timezone.localdate(), "created_by": request.user},
     )
     if household.program_id != program.id:
+        sync.status = SyncOperation.Status.CONFLICT
+        sync.error_message = "client_generated_id already belongs to another program."
+        sync.processed_at = timezone.now()
+        sync.save(update_fields=["status", "error_message", "processed_at"])
         raise ValidationError({"client_generated_id": "Already belongs to another program"})
 
-    beneficiaries_created = 0
-    for beneficiary_data in request.data.get("beneficiaries", []):
-        number = beneficiary_data.get("number")
-        full_name = beneficiary_data.get("full_name")
+    synced = []
+    for data in request.data.get("beneficiaries", []):
+        number, full_name = data.get("number"), data.get("full_name")
         if not number or not full_name:
             raise ValidationError({"beneficiaries": "Each beneficiary requires number and full_name"})
-        _, created = Beneficiary.objects.get_or_create(
-            household=household,
-            number=number,
-            defaults={
-                "full_name": full_name,
-                "gender": beneficiary_data.get("gender", ""),
-                "phone_last4": beneficiary_data.get("phone_last4", ""),
-                "consent_given": beneficiary_data.get("consent_given", False),
-                "created_by": request.user,
-            },
+        beneficiary, _ = Beneficiary.objects.get_or_create(
+            household=household, number=number,
+            defaults={"full_name": full_name, "gender": data.get("gender", ""), "date_of_birth": data.get("date_of_birth") or None, "phone_last4": data.get("phone_last4", ""), "national_id_hash": data.get("national_id_hash", ""), "consent_given": data.get("consent_given", False), "created_by": request.user},
         )
-        beneficiaries_created += int(created)
-    audit(request.user, "OFFLINE_REGISTRATION_SYNCED", household, after={"client_generated_id": client_generated_id})
-    return Response({
-        "status": "synchronized",
-        "household_id": str(household.id),
-        "household_created": household_created,
-        "beneficiaries_created": beneficiaries_created,
-        "client_generated_id": client_generated_id,
-        "tenant_isolated": True,
-    }, status=status.HTTP_201_CREATED if household_created else status.HTTP_200_OK)
+        synced.append(beneficiary)
+
+    validation_results = validate_synced_registration(sync, household, synced)
+    audit(request.user, "OFFLINE_REGISTRATION_SYNCED", household, after={"operation_id": operation_id, "client_generated_id": client_generated_id, "beneficiaries_count": len(synced), "sync_status": sync.status})
+    return Response({"status": "synchronized", "operation_id": operation_id, "sync_status": sync.status, "household_id": str(household.id), "household_created": household_created, "beneficiaries_processed": len(synced), "client_generated_id": client_generated_id, "validation_results": validation_results, "tenant_isolated": True}, status=status.HTTP_201_CREATED if household_created else status.HTTP_200_OK)
+
+
+@api_view(["GET", "POST"])
+def ai_closed_view(request, *args, **kwargs):
+    return Response({"enabled": True, "message": "AI services are available through dedicated endpoints."})
+
+
+@api_view(["POST"])
+def data_quality_api(request, beneficiary_id):
+    if request.user.role not in {User.Role.ADMIN, User.Role.FIELD_OFFICER, User.Role.REVIEWER, User.Role.MANAGER, User.Role.AUDITOR}:
+        raise PermissionDenied("Your role does not have permission to run data-quality checks")
+    beneficiary = get_object_or_404(Beneficiary, id=beneficiary_id, household__tenant=request.user.tenant)
+    return Response(run_data_quality_check(beneficiary))
+
+
+@api_view(["POST"])
+def automation_event_api(request):
+    if request.user.role not in {User.Role.ADMIN, User.Role.MANAGER}:
+        raise PermissionDenied("Only administrators and managers can execute automation rules")
+    event_name, payload = request.data.get("event_name"), request.data.get("payload", {})
+    if not event_name or not isinstance(payload, dict):
+        raise ValidationError({"event_name": "Required", "payload": "Must be an object"})
+    program = None
+    program_id = request.data.get("program_id") or payload.get("program_id")
+    if program_id:
+        program = get_object_or_404(Program, id=program_id, tenant=request.user.tenant)
+    return Response({"event_name": event_name, "executions": process_automation_event(tenant=request.user.tenant, event_name=event_name, payload=payload, program=program, dry_run=bool(request.data.get("dry_run", False)))})
 
 
 @api_view(['POST'])
-def trigger_deduplication_api(request, beneficiary_id=None):
+def trigger_deduplication_api(request, beneficiary_id):
     """
-    نقطة نهاية لتشغيل فحص التكرار لمستفيد معين أو عام
+    نقطة نهاية لتشغيل فحص التكرار لمستفيد معين عبر الـ API
     """
     try:
-        if beneficiary_id:
-            beneficiary = Beneficiary.objects.get(id=beneficiary_id)
-            has_duplicates = run_deduplication_check(beneficiary)
-            return Response({
-                "status": "success",
-                "beneficiary_id": beneficiary_id,
-                "duplicate_flagged": has_duplicates,
-                "message": "Deduplication check executed successfully."
-            }, status=status.HTTP_200_OK)
-        else:
-            return Response({"success": True, "message": "Deduplication check completed successfully."})
+        beneficiary = get_object_or_404(Beneficiary, id=beneficiary_id, household__tenant=request.user.tenant)
+        has_duplicates = run_deduplication_check(beneficiary)
+        return Response({
+            "status": "success",
+            "beneficiary_id": beneficiary_id,
+            "duplicate_flagged": has_duplicates,
+            "message": "Deduplication check executed successfully."
+        }, status=status.HTTP_200_OK)
     except Beneficiary.DoesNotExist:
         return Response({"error": "Beneficiary not found."}, status=status.HTTP_404_NOT_FOUND)
 
 
 @api_view(['POST'])
 def trigger_reconciliation_api(request):
+    if request.user.role not in {User.Role.ADMIN, User.Role.FINANCE, User.Role.MANAGER, User.Role.AUDITOR}:
+        raise PermissionDenied("Only finance-authorized roles can run reconciliation")
     """
     نقطة نهاية لتشغيل التسوية التلقائية لدفعة مالية بناءً على تقرير المزود
     """
     batch_id = request.data.get("batch_id")
-    provider_report_data = request.data.get("provider_report_data", {})
+    provider_report_data = request.data.get("provider_report_data", {}) # Dictionary of reports
     
     if not batch_id:
-        return Response({"success": True, "message": "Reconciliation check completed successfully."})
+        return Response({"error": "batch_id is required."}, status=status.HTTP_400_BAD_REQUEST)
 
     results = run_automated_reconciliation(batch_id, provider_report_data)
     return Response({
@@ -537,12 +660,14 @@ def trigger_reconciliation_api(request):
 
 @api_view(['POST'])
 def trigger_anomaly_detection_api(request):
+    if request.user.role not in {User.Role.ADMIN, User.Role.FINANCE, User.Role.MANAGER, User.Role.AUDITOR}:
+        raise PermissionDenied("Only finance-authorized roles can run anomaly detection")
     """
-    نقطة نهاية لكشف الانحرافات والأنماط الشاذة للدفعة المالية أو الاحتيال
+    نقطة نهاية لكشف الانحرافات والأنماط الشاذة للدفعة المالية
     """
     batch_id = request.data.get("batch_id")
     if not batch_id:
-        return Response({"success": True, "message": "Anomaly and fraud-risk scan executed successfully."})
+        return Response({"error": "batch_id is required."}, status=status.HTTP_400_BAD_REQUEST)
 
     anomalies_count = run_anomaly_detection(batch_id)
     return Response({
@@ -551,20 +676,3 @@ def trigger_anomaly_detection_api(request):
         "anomalies_detected": anomalies_count,
         "message": "Anomaly detection execution completed."
     }, status=status.HTTP_200_OK)
-
-
-@api_view(["GET", "POST"])
-def ai_automation_status_view(request):
-    tenant = request.user.tenant
-    if request.method == "GET":
-        rules = AutomationRule.objects.filter(program__tenant=tenant)
-        signals = AISignal.objects.filter(program__tenant=tenant)
-        return Response({
-            "status": "active",
-            "message": "AI and Automation engine is fully operational.",
-            "rules": list(rules.values("id", "event_type", "action_type", "is_active")),
-            "signals_count": signals.count(),
-        })
-    elif request.method == "POST":
-        action_name = request.data.get("action")
-        return Response({"success": True, "message": f"Automation action '{action_name}' executed successfully."})

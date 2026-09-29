@@ -10,6 +10,7 @@ from .models import (
     Beneficiary,
     Budget,
     Complaint,
+    ComplaintAIAnalysis,
     Enrollment,
     Household,
     PaymentChannelConfig,
@@ -19,6 +20,7 @@ from .models import (
     Program,
     ReconciliationItem,
     ReviewTask,
+    SyncOperation,
     Tenant,
     User,
 )
@@ -177,6 +179,13 @@ class ComplaintSerializer(serializers.ModelSerializer):
         return super().update(instance, validated_data)
 
 
+class ComplaintAIAnalysisSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = ComplaintAIAnalysis
+        fields = "__all__"
+        read_only_fields = ["id", "tenant", "created_at", "updated_at"]
+
+
 class BudgetSerializer(serializers.ModelSerializer):
     class Meta:
         model = Budget
@@ -252,3 +261,10 @@ class AutomationExecutionSerializer(serializers.ModelSerializer):
         model = AutomationExecution
         fields = "__all__"
         read_only_fields = ["tenant", "created_at", "status", "planned_action"]
+
+
+class SyncOperationSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = SyncOperation
+        fields = "__all__"
+        read_only_fields = ["id", "tenant", "created_at", "processed_at", "status", "validation_results", "error_message", "request_hash"]
