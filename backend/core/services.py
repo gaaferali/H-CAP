@@ -1,11 +1,7 @@
-
 from decimal import Decimal
 from django.db.models import Q
 from django.utils import timezone
 from .models import AISignal, ReviewTask, Beneficiary, PaymentEvent, PaymentBatch
-
-# change it to true عشان تشغل ال ai
-AI_AUTOMATION_ENABLED = False
 
 def run_deduplication_check(beneficiary):
     """
@@ -13,8 +9,6 @@ def run_deduplication_check(beneficiary):
     يقارن الاسم، آخر رقم هاتف، وهاش الهوية الوطنية
     """
     # البحث عن مستفيدين آخرين بنفس المعايير (باستثناء نفس المستفيد)
-    if not AI_AUTOMATION_ENABLED:
-        return False
     duplicates = Beneficiary.objects.filter(
         household__program=beneficiary.household.program
     ).exclude(id=beneficiary.id).filter(
@@ -65,8 +59,6 @@ def run_automated_reconciliation(batch_id, provider_report_data):
     يقارن دفعات النظام بتقرير مزود خدمة الدفع (FSP) الخارجي
     ويحدد النجاح، الفشل، أو الحالات غير المتطابقة (Unmatched)
     """
-    if not AI_AUTOMATION_ENABLED:
-        return {"matched": 0, "mismatched": 0, "unresolved": 0}
     reconciliation_results = {
         "matched": 0,
         "mismatched": 0,
@@ -139,8 +131,6 @@ def run_anomaly_detection(payment_batch):
     محرك كشف الأنماط الشاذة والاحتيال:
     يرصد العمليات المتكررة أو الشاذة بناءً على القيم أو تكرار الحسابات
     """
-    if not AI_AUTOMATION_ENABLED:
-        return 0
     anomalies_detected = 0
     events = PaymentEvent.objects.filter(instruction__batch_id=payment_batch)
 
@@ -189,8 +179,6 @@ class AICopilotService:
     
     @staticmethod
     def generate_system_summary_report():
-        if not AI_AUTOMATION_ENABLED:
-            return "AI copilot is disabled."
         # 1. جمع الإحصائيات الحية من قواعد البيانات
         total_beneficiaries = Beneficiary.objects.count()
         total_signals = AISignal.objects.count()

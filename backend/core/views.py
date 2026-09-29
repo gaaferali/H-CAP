@@ -23,8 +23,8 @@ from rest_framework.response import Response
 from rest_framework_simplejwt.exceptions import TokenError
 from rest_framework_simplejwt.tokens import RefreshToken
 
-from .services import AI_AUTOMATION_ENABLED, run_deduplication_check, run_automated_reconciliation, run_anomaly_detection
-
+from .services import run_deduplication_check, run_automated_reconciliation, run_anomaly_detection
+#AI_AUTOMATION_ENABLED
 try:
     from .services import verified_program_summary
 except ImportError:
