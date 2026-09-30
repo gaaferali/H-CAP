@@ -1,7 +1,21 @@
 from decimal import Decimal
 from django.db.models import Q
 from django.utils import timezone
-from .models import AISignal, ReviewTask, Beneficiary, PaymentEvent, PaymentBatch
+from .models import AISignal, Beneficiary, Complaint, Enrollment, PaymentBatch, PaymentEvent, PaymentInstruction, ReconciliationItem, ReviewTask
+
+AI_AUTOMATION_ENABLED = True
+
+
+def _review_task(tenant, program, task_type, entity_type, entity_id, priority, resolution):
+    return ReviewTask.objects.get_or_create(
+        tenant=tenant,
+        program=program,
+        task_type=task_type,
+        entity_type=entity_type,
+        entity_id=str(entity_id),
+        status__in=[ReviewTask.Status.OPEN, ReviewTask.Status.ASSIGNED],
+        defaults={"priority": priority, "resolution": resolution},
+    )[0]
 
 def run_deduplication_check(beneficiary):
     """
@@ -16,8 +30,10 @@ def run_deduplication_check(beneficiary):
         Q(phone_last4=beneficiary.phone_last4)
     )
 
-    if duplicates.exists():
-        for dup in duplicates:
+    matches = list(duplicates)
+    signals = []
+    if matches:
+        for dup in matches:
             # حساب نقاط الثقة التطابقية افتراضياً (يمكن تحسينها بخوارزميات تشابه النصوص)
             score = Decimal("0.91") if dup.national_id_hash == beneficiary.national_id_hash else Decimal("0.75")
             
@@ -33,24 +49,15 @@ def run_deduplication_check(beneficiary):
                     "confidence": Decimal("0.89"),
                     "reason": f"Matched with existing beneficiary ID: {dup.id} based on national ID/phone.",
                     "model_version": "dedup-v1.0",
-                    "status": "PENDING"
+                    "status": AISignal.Status.OPEN
                 }
             )
 
             # إنشاء مهمة مراجعة بشرية مرتبطة بالإشارة (Human-in-the-loop control)
             if created:
-                ReviewTask.objects.create(
-                    tenant=beneficiary.household.tenant,
-                    program=beneficiary.household.program,
-                    task_type="DUPLICATE_REVIEW",
-                    entity_type="BENEFICIARY",
-                    entity_id=str(beneficiary.id),
-                    priority="HIGH",
-                    status="OPEN",
-                    resolution=f"AI flagged potential duplicate with score {signal.score}. Review required."
-                )
-        return True
-    return False
+                _review_task(beneficiary.household.tenant, beneficiary.household.program, ReviewTask.TaskType.DUPLICATE_REVIEW, "BENEFICIARY", beneficiary.id, ReviewTask.Priority.HIGH, f"Review possible duplicate {dup.id}.")
+            signals.append(signal)
+    return {"matches": len(matches), "signals": signals}
 
 
 def run_automated_reconciliation(batch_id, provider_report_data):
@@ -59,117 +66,73 @@ def run_automated_reconciliation(batch_id, provider_report_data):
     يقارن دفعات النظام بتقرير مزود خدمة الدفع (FSP) الخارجي
     ويحدد النجاح، الفشل، أو الحالات غير المتطابقة (Unmatched)
     """
-    reconciliation_results = {
-        "matched": 0,
-        "mismatched": 0,
-        "unresolved": 0
-    }
-
-    # جلب أحداث الدفع المرتبطة بالدفعة المحددة
-    payment_events = PaymentEvent.objects.filter(instruction__batch_id=batch_id)
-
-    for event in payment_events:
-        # البحث عن المعاملة في تقارير المزود بناءً على مرجع المعاملة أو رقم المستفيد
-        provider_record = provider_report_data.get(event.provider_reference)
-
-        if not provider_record:
-            # حالة: المعاملة غير موجودة في تقارير المزود (غير مطابقة)
-            event.status = "UNMATCHED"
-            event.save()
-            reconciliation_results["unresolved"] += 1
-            
-            # إنشاء مهمة مراجعة استثناءات للمدفوعات
-            ReviewTask.objects.create(
-                tenant=event.tenant,
-                program=event.program,
-                task_type="RECONCILIATION_EXCEPTION",
-                entity_type="PAYMENT_EVENT",
-                entity_id=str(event.id),
-                priority="HIGH",
-                status="OPEN",
-                resolution=f"Payment event {event.id} missing from provider report. Requires manual reconciliation."
-            )
-            continue
-
-        # مقارنة المبالغ والحالة الواردة من المزود
-        provider_amount = Decimal(str(provider_record.get("amount", "0")))
-        provider_status = provider_record.get("status") # SUCCESS, FAILED, REFUNDED
-
-        if provider_amount == event.amount and provider_status == "SUCCESS":
-            event.status = "RECONCILED_SUCCESS"
-            event.provider_status = provider_status
-            event.resolved_at = timezone.now()
-            event.save()
-            reconciliation_results["matched"] += 1
-        elif provider_status == "FAILED":
-            event.status = "RECONCILED_FAILED"
-            event.provider_status = provider_status
-            event.save()
-            reconciliation_results["mismatched"] += 1
-            
-            # توجيه الدفعة الفاشلة لطابور إعادة المحاولة أو المعالجة
-            ReviewTask.objects.create(
-                tenant=event.tenant,
-                program=event.program,
-                task_type="PAYMENT_FAILURE_REVIEW",
-                entity_type="PAYMENT_EVENT",
-                entity_id=str(event.id),
-                priority="MEDIUM",
-                status="OPEN",
-                resolution=f"Payment failed at FSP level. Reason: {provider_record.get('fail_reason', 'Unknown')}"
-            )
+    batch = batch_id if isinstance(batch_id, PaymentBatch) else PaymentBatch.objects.get(pk=batch_id)
+    summary = {"matched": 0, "pending": 0, "discrepancies": 0, "items": []}
+    events = PaymentEvent.objects.filter(instruction__batch=batch).select_related("instruction")
+    for event in events:
+        instruction = event.instruction
+        record = provider_report_data.get(instruction.provider_reference)
+        if not record:
+            issue_type, actual_amount, actual_status = ReconciliationItem.IssueType.MISSING_REFERENCE, None, "MISSING"
+            summary["pending"] += 1
         else:
-            # فروقات في المبالغ أو الحالة
-            event.status = "AMOUNT_MISMATCH"
-            event.save()
-            reconciliation_results["mismatched"] += 1
-
-    return reconciliation_results
+            actual_amount = Decimal(str(record.get("amount", "0")))
+            actual_status = str(record.get("status", "UNKNOWN")).upper()
+            if actual_status == "SUCCESS" and actual_amount == instruction.amount:
+                summary["matched"] += 1
+                continue
+            issue_type = ReconciliationItem.IssueType.FAILED if actual_status == "FAILED" else ReconciliationItem.IssueType.AMOUNT_MISMATCH if actual_amount != instruction.amount else ReconciliationItem.IssueType.STATUS_MISMATCH
+            summary["discrepancies"] += 1
+        item, _ = ReconciliationItem.objects.update_or_create(
+            tenant=batch.tenant, program=batch.program, instruction=instruction, issue_type=issue_type,
+            defaults={"expected_amount": instruction.amount, "actual_amount": actual_amount, "expected_status": instruction.status, "actual_status": actual_status, "provider_reference": instruction.provider_reference, "status": ReconciliationItem.Status.OPEN},
+        )
+        _review_task(batch.tenant, batch.program, ReviewTask.TaskType.RECONCILIATION, "PAYMENT_INSTRUCTION", instruction.pk, ReviewTask.Priority.HIGH, "Reconciliation discrepancy requires human resolution.")
+        summary["items"].append(str(item.pk))
+    return summary
 
 def run_anomaly_detection(payment_batch):
     """
     محرك كشف الأنماط الشاذة والاحتيال:
     يرصد العمليات المتكررة أو الشاذة بناءً على القيم أو تكرار الحسابات
     """
-    anomalies_detected = 0
-    events = PaymentEvent.objects.filter(instruction__batch_id=payment_batch)
-
-    # جلب الـ tenant والـ program من الـ batch مباشرة لتفادي الأخطاء
-    batch_obj = payment_batch if hasattr(payment_batch, 'tenant') else PaymentBatch.objects.filter(pk=payment_batch).first()
-    tenant = getattr(batch_obj, 'tenant', None)
-    program = getattr(batch_obj, 'program', None)
-
-    for event in events:
-        # التحقق من المبلغ عبر الـ instruction المرتبط
-        if event.instruction and event.instruction.amount > Decimal("500.00"):  # حد افتراضي للمبالغ العالية
-            AISignal.objects.get_or_create(
-                tenant=tenant,
-                program=program,
-                entity_type="PAYMENT_EVENT",
-                entity_id=str(event.id),
+    batch = payment_batch if isinstance(payment_batch, PaymentBatch) else PaymentBatch.objects.get(pk=payment_batch)
+    signals = []
+    for instruction in batch.instructions.all():
+        if instruction.amount > Decimal("500.00"):
+            signal, _ = AISignal.objects.update_or_create(
+                tenant=batch.tenant,
+                program=batch.program,
+                entity_type="PAYMENT_INSTRUCTION",
+                entity_id=str(instruction.id),
                 signal_type="HIGH_AMOUNT_ANOMALY",
                 defaults={
                     "score": Decimal("0.85"),
                     "confidence": Decimal("0.80"),
-                    "reason": f"Payment amount {event.instruction.amount} exceeds standard threshold, flagged for review.",
+                    "reason": f"Payment amount {instruction.amount} exceeds standard threshold, flagged for review.",
                     "model_version": "anomaly-v1.0",
-                    "status": "PENDING"
+                    "status": AISignal.Status.OPEN
                 }
             )
 
-            ReviewTask.objects.create(
-                tenant=tenant,
-                program=program,
-                task_type="FRAUD_REVIEW",
-                entity_type="PAYMENT_EVENT",
-                entity_id=str(event.id),
-                priority="HIGH",
-                status="OPEN",
-                resolution="Anomaly detected: High transfer value requires verification before release."
-            )
-            anomalies_detected += 1
+            _review_task(batch.tenant, batch.program, ReviewTask.TaskType.RISK_REVIEW, "PAYMENT_INSTRUCTION", instruction.id, ReviewTask.Priority.HIGH, "Review advisory high-value payment signal before any human decision.")
+            signals.append(signal)
+    return signals
 
-    return anomalies_detected
+
+def verified_program_summary(program):
+    payments = PaymentInstruction.objects.filter(enrollment__program=program)
+    enrollments = Enrollment.objects.filter(program=program)
+    return {
+        "beneficiaries": Beneficiary.objects.filter(household__program=program).count(),
+        "eligibility": list(enrollments.values("eligibility_status").order_by("eligibility_status")),
+        "approvals": enrollments.filter(status=Enrollment.Status.APPROVED).count(),
+        "payments": list(payments.values("status").order_by("status")),
+        "amounts": {"approved": str(program.transfer_amount * enrollments.filter(status=Enrollment.Status.APPROVED).count()), "distributed": str(sum((payment.amount for payment in payments.filter(status=PaymentInstruction.Status.SUCCESS)), Decimal("0")))},
+        "failures": payments.filter(status=PaymentInstruction.Status.FAILED).count(),
+        "complaints": Complaint.objects.filter(beneficiary__household__program=program).count(),
+        "verified_at": timezone.now(),
+    }
 
 class AICopilotService:
     """
