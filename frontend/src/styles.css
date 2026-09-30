@@ -74,6 +74,11 @@ h2 { color: var(--institution-navy); font-size: 19px; font-weight: 800; margin: 
 .function-help summary::before { content: "?"; align-items: center; background: var(--institution-blue); border-radius: 50%; color: #fff; display: inline-flex; font-size: 11px; height: 18px; justify-content: center; margin-inline-end: 7px; width: 18px; }
 .function-help-body { border-top: 1px solid rgba(8,126,181,.16); color: var(--muted); font-size: 13px; padding: 10px 0 2px; }
 .function-help-body p { margin-bottom: 8px; }
+.complaint-details { display: grid; grid-template-columns: minmax(150px, 1fr) 2fr; gap: 8px 16px; }
+.complaint-details dt { color: var(--institution-navy); font-weight: 700; }
+.complaint-details dd { margin: 0; overflow-wrap: anywhere; }
+.ai-analysis h3 { color: var(--institution-navy); font-size: 16px; font-weight: 800; margin-top: 20px; }
+.ai-evidence { background: #f7fafc; border: 1px solid var(--line); border-radius: 8px; font-size: 12px; max-height: 280px; overflow: auto; padding: 12px; white-space: pre-wrap; }
 
 .login-page { align-items: center; background: linear-gradient(135deg, var(--institution-deep), var(--institution-blue)); display: flex; justify-content: center; min-height: 100vh; padding: 20px; }
 .login-card { background: #fff; border-top: 6px solid var(--institution-blue); border-radius: 16px; box-shadow: 0 14px 34px rgba(0,31,61,.35); display: grid; gap: 12px; max-width: 420px; padding: 34px; width: 100%; }
@@ -89,4 +94,5 @@ h2 { color: var(--institution-navy); font-size: 19px; font-weight: 800; margin: 
   .topbar { align-items: flex-start; flex-direction: column; }
   .topbar-actions { justify-content: flex-start; }
   .profile-grid { grid-template-columns: 1fr; }
+  .complaint-details { grid-template-columns: 1fr; gap: 2px; }
 }

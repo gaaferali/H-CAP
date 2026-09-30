@@ -13,6 +13,8 @@ from .models import (
     Beneficiary,
     Budget,
     Complaint,
+    ComplaintAIAnalysis,
+    ComplaintAIAnalysis,
     Enrollment,
     Household,
     PaymentChannelConfig,
@@ -329,6 +331,7 @@ class ComplaintSerializer(serializers.ModelSerializer):
     program_name = serializers.CharField(source="beneficiary.household.program.name", read_only=True)
     household_reference = serializers.SerializerMethodField()
     assigned_to_name = serializers.CharField(source="assigned_to.full_name", read_only=True)
+    ai_analysis_available = serializers.SerializerMethodField()
 
     class Meta:
         model = Complaint
@@ -355,6 +358,59 @@ class ComplaintSerializer(serializers.ModelSerializer):
     def get_household_reference(self, complaint):
         household = complaint.beneficiary.household
         return household.client_generated_id or f"HH-{str(household.id).split('-')[0].upper()}"
+
+    def get_ai_analysis_available(self, complaint):
+        return ComplaintAIAnalysis.objects.filter(complaint=complaint).exists()
+
+
+class ComplaintAIAnalysisSerializer(serializers.ModelSerializer):
+    complaint_id = serializers.UUIDField(source="complaint.id", read_only=True)
+    human_review_required = serializers.SerializerMethodField()
+
+    class Meta:
+        model = ComplaintAIAnalysis
+        fields = ["complaint_id", "category", "severity", "summary", "possible_causes", "recommended_actions", "evidence", "confidence", "requires_escalation", "model_version", "human_review_required", "review_decision", "reviewer_note", "reviewed_by", "reviewed_at", "created_at", "updated_at"]
+        read_only_fields = fields
+
+    def get_human_review_required(self, analysis):
+        return True
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        evidence = data.get("evidence") or {}
+        if not evidence.get("payment_context"):
+            evidence["payment_context"] = {"available": False, "message": "No linked payment instruction or payment evidence was available."}
+        data["evidence"] = evidence
+        return data
+
+
+class ComplaintAIAnalysisSerializer(serializers.ModelSerializer):
+    complaint_id = serializers.UUIDField(source="complaint.id", read_only=True)
+    human_review_required = serializers.SerializerMethodField()
+
+    class Meta:
+        model = ComplaintAIAnalysis
+        fields = [
+            "complaint_id", "category", "severity", "summary", "possible_causes",
+            "recommended_actions", "evidence", "confidence", "requires_escalation",
+            "model_version", "human_review_required", "review_decision", "reviewer_note",
+            "reviewed_by", "reviewed_at", "created_at", "updated_at",
+        ]
+        read_only_fields = fields
+
+    def get_human_review_required(self, analysis):
+        return True
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        evidence = data.get("evidence") or {}
+        if not evidence.get("payment_context"):
+            evidence["payment_context"] = {
+                "available": False,
+                "message": "No linked payment instruction or payment evidence was available.",
+            }
+        data["evidence"] = evidence
+        return data
 
 
 class BudgetSerializer(serializers.ModelSerializer):

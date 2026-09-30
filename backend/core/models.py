@@ -246,6 +246,11 @@ class PaymentEvent(models.Model):
 
 
 class Complaint(models.Model):
+    class Category(models.TextChoices):
+        PAYMENT = "PAYMENT", "Payment"
+        ACCESS = "ACCESS", "Access"
+        ELIGIBILITY = "ELIGIBILITY", "Eligibility"
+
     class Severity(models.TextChoices):
         LOW = "LOW", "Low"
         MEDIUM = "MEDIUM", "Medium"
@@ -261,7 +266,7 @@ class Complaint(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     beneficiary = models.ForeignKey(Beneficiary, on_delete=models.PROTECT, related_name="complaints")
     instruction = models.ForeignKey(PaymentInstruction, on_delete=models.PROTECT, null=True, blank=True, related_name="complaints")
-    category = models.CharField(max_length=120)
+    category = models.CharField(max_length=120, choices=Category.choices)
     description = models.TextField()
     severity = models.CharField(max_length=20, choices=Severity.choices, default=Severity.MEDIUM)
     status = models.CharField(max_length=20, choices=Status.choices, default=Status.OPEN)
@@ -270,6 +275,32 @@ class Complaint(models.Model):
     resolved_at = models.DateTimeField(null=True, blank=True)
     created_by = models.ForeignKey(User, on_delete=models.PROTECT, related_name="created_complaints")
     created_at = models.DateTimeField(default=django_timezone.now)
+
+
+class ComplaintAIAnalysis(models.Model):
+    class ReviewDecision(models.TextChoices):
+        ACCEPT = "ACCEPT", "Accept"
+        MODIFY = "MODIFY", "Modify"
+        DISMISS = "DISMISS", "Dismiss"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    complaint = models.OneToOneField(Complaint, on_delete=models.PROTECT, related_name="ai_analysis")
+    tenant = models.ForeignKey(Tenant, on_delete=models.PROTECT, related_name="complaint_ai_analyses")
+    category = models.CharField(max_length=120)
+    severity = models.CharField(max_length=20, choices=Complaint.Severity.choices)
+    summary = models.TextField()
+    possible_causes = models.JSONField(default=list, blank=True)
+    recommended_actions = models.JSONField(default=list, blank=True)
+    evidence = models.JSONField(default=dict, blank=True)
+    confidence = models.DecimalField(max_digits=8, decimal_places=4, default=0)
+    requires_escalation = models.BooleanField(default=False)
+    model_version = models.CharField(max_length=80)
+    review_decision = models.CharField(max_length=20, choices=ReviewDecision.choices, blank=True)
+    reviewer_note = models.TextField(blank=True)
+    reviewed_by = models.ForeignKey(User, on_delete=models.PROTECT, null=True, blank=True, related_name="reviewed_complaint_ai_analyses")
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(default=django_timezone.now)
+    updated_at = models.DateTimeField(auto_now=True)
 
 
 class PDMResponse(models.Model):

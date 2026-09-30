@@ -24,6 +24,7 @@ from rest_framework_simplejwt.exceptions import TokenError
 from rest_framework_simplejwt.tokens import RefreshToken
 
 from .services import run_deduplication_check, run_automated_reconciliation, run_anomaly_detection
+from .complaint import analyze_complaint
 #AI_AUTOMATION_ENABLED
 try:
     from .services import verified_program_summary
@@ -38,6 +39,7 @@ from .models import (
     Beneficiary,
     Budget,
     Complaint,
+    ComplaintAIAnalysis,
     Enrollment,
     Household,
     PaymentChannelConfig,
@@ -61,6 +63,7 @@ from .serializers import (
     BeneficiarySerializer,
     BudgetSerializer,
     ComplaintSerializer,
+    ComplaintAIAnalysisSerializer,
     EnrollmentSerializer,
     HouseholdSerializer,
     LoginSerializer,
@@ -567,6 +570,67 @@ class ComplaintViewSet(RoleProtectedTenantViewSet):
     serializer_class = ComplaintSerializer
     tenant_field = "beneficiary__household__tenant"
     allowed_roles = {User.Role.ADMIN, User.Role.SUPPORT, User.Role.MANAGER}
+
+
+COMPLAINT_AI_READ_ROLES = {User.Role.ADMIN, User.Role.MANAGER, User.Role.REVIEWER, User.Role.AUDITOR}
+COMPLAINT_AI_WRITE_ROLES = {User.Role.ADMIN, User.Role.MANAGER, User.Role.REVIEWER}
+
+
+def complaint_ai_scope(request, complaint_id):
+    if request.user.role not in COMPLAINT_AI_READ_ROLES:
+        raise PermissionDenied("Your role does not have permission for complaint AI analysis")
+    complaints = Complaint.objects.select_related("beneficiary__household__program", "instruction")
+    if not request.user.is_superuser:
+        complaints = complaints.filter(beneficiary__household__tenant=request.user.tenant)
+    return get_object_or_404(complaints, id=complaint_id)
+
+
+@api_view(["POST"])
+def complaint_ai_analyze_view(request, complaint_id):
+    complaint = complaint_ai_scope(request, complaint_id)
+    if request.user.role not in COMPLAINT_AI_WRITE_ROLES:
+        raise PermissionDenied("Your role does not have permission to run complaint AI analysis")
+    analysis = analyze_complaint(complaint, actor=request.user)
+    audit(request.user, "COMPLAINT_AI_ANALYZED", analysis, after=ComplaintAIAnalysisSerializer(analysis).data, tenant=analysis.tenant)
+    return Response(ComplaintAIAnalysisSerializer(analysis).data)
+
+
+@api_view(["GET"])
+def complaint_ai_analysis_view(request, complaint_id):
+    complaint = complaint_ai_scope(request, complaint_id)
+    analysis = get_object_or_404(ComplaintAIAnalysis, complaint=complaint)
+    return Response(ComplaintAIAnalysisSerializer(analysis).data)
+
+
+@api_view(["POST"])
+def complaint_ai_review_view(request, complaint_id):
+    complaint = complaint_ai_scope(request, complaint_id)
+    if request.user.role not in COMPLAINT_AI_WRITE_ROLES:
+        raise PermissionDenied("Your role does not have permission to review complaint AI analysis")
+    decision = request.data.get("decision")
+    if decision not in ComplaintAIAnalysis.ReviewDecision.values:
+        raise ValidationError({"decision": "Use ACCEPT, MODIFY, or DISMISS."})
+    analysis = get_object_or_404(ComplaintAIAnalysis, complaint=complaint)
+    before = ComplaintAIAnalysisSerializer(analysis).data
+    analysis.review_decision = decision
+    analysis.reviewer_note = request.data.get("reviewer_note", "")
+    analysis.reviewed_by = request.user
+    analysis.reviewed_at = timezone.now()
+    analysis.save(update_fields=["review_decision", "reviewer_note", "reviewed_by", "reviewed_at", "updated_at"])
+    audit(request.user, "COMPLAINT_AI_REVIEWED", analysis, before=before, after=ComplaintAIAnalysisSerializer(analysis).data, tenant=analysis.tenant)
+    return Response(ComplaintAIAnalysisSerializer(analysis).data)
+
+
+@api_view(["POST"])
+def complaint_ai_analyze_bulk_view(request):
+    if request.user.role not in COMPLAINT_AI_WRITE_ROLES:
+        raise PermissionDenied("Your role does not have permission to run complaint AI analysis")
+    complaints = Complaint.objects.select_related("beneficiary__household__program", "instruction").filter(status=Complaint.Status.OPEN)
+    if not request.user.is_superuser:
+        complaints = complaints.filter(beneficiary__household__tenant=request.user.tenant)
+    analyses = [analyze_complaint(complaint, actor=request.user) for complaint in complaints]
+    audit(request.user, "COMPLAINT_AI_BULK_ANALYZED", request.user, after={"analyzed_count": len(analyses)}, tenant=request.user.tenant)
+    return Response({"analyzed_count": len(analyses), "analyses": ComplaintAIAnalysisSerializer(analyses, many=True).data})
 
 
 class BudgetViewSet(RoleProtectedTenantViewSet):

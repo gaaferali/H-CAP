@@ -8,7 +8,7 @@ import { api, listItems, PlatformUser } from "./api";
 type Role = "ADMIN" | "FIELD_OFFICER" | "FINANCE" | "REVIEWER" | "SUPPORT" | "MANAGER" | "AUDITOR";
 type Route = "dashboard" | "tenants" | "programs" | "households" | "beneficiaries" | "eligibility" | "enrollment" | "payments" | "pdm" | "complaints" | "budgets" | "activities" | "audit" | "imports" | "automation" | "users" | "profile";
 type Locale = "en" | "ar";
-type Entity = { id: string; name?: string; full_name?: string; number?: string; status?: string; currency?: string; program?: string; household?: string; beneficiary?: string; enrollment?: string; channel_config?: string; tenant?: string; [key: string]: unknown };
+type Entity = { id: string; name?: string; full_name?: string; number?: string; status?: string; currency?: string; program?: string; household?: string; beneficiary?: string; enrollment?: string; channel_config?: string; tenant?: string; [key: string]: any };
 type Option = { value: string; label: string };
 
 const arabic: Record<string, string> = {
@@ -166,10 +166,10 @@ function SelectField({ label, name, options, required = false, value, onChange, 
   return <div className="mb-3"><label className="form-label" htmlFor={id}>{translate(label)}{required && " *"}</label><select className="form-select" id={id} name={name} required={required} value={value} onChange={(event) => onChange?.(event.target.value)} disabled={disabled}><option value="">{translate("Select…")}</option>{options.map((option) => <option key={option.value} value={option.value}>{translate(option.label)}</option>)}</select></div>;
 }
 
-function Textarea({ label, name, required = false, help, placeholder }: { label: string; name: string; required?: boolean; help?: string; placeholder?: string }) {
+function Textarea({ label, name, required = false, help, placeholder, value, onChange }: { label: string; name: string; required?: boolean; help?: string; placeholder?: string; value?: string; onChange?: (value: string) => void }) {
   const translate = useTranslation();
   const id = `field-${name}`;
-  return <div className="mb-3"><label className="form-label" htmlFor={id}>{translate(label)}{required && " *"}</label><textarea className="form-control" id={id} name={name} required={required} rows={3} placeholder={placeholder ? translate(placeholder) : undefined} />{help && <div className="form-text">{translate(help)}</div>}</div>;
+  return <div className="mb-3"><label className="form-label" htmlFor={id}>{translate(label)}{required && " *"}</label><textarea className="form-control" id={id} name={name} required={required} rows={3} placeholder={placeholder ? translate(placeholder) : undefined} value={value} onChange={(event) => onChange?.(event.target.value)} />{help && <div className="form-text">{translate(help)}</div>}</div>;
 }
 
 function Login({ onLogin }: { onLogin: (user: PlatformUser) => void }) {
@@ -302,9 +302,14 @@ function ComplaintsPage({ role }: { role: Role }) {
   const [beneficiaries, setBeneficiaries] = useState<Entity[]>([]);
   const [complaints, setComplaints] = useState<Entity[]>([]);
   const [users, setUsers] = useState<PlatformUser[]>([]);
+  const [selectedComplaint, setSelectedComplaint] = useState<Entity | null>(null);
+  const [analysis, setAnalysis] = useState<Entity | null>(null);
+  const [analysisLoading, setAnalysisLoading] = useState(false);
+  const [reviewNote, setReviewNote] = useState("");
   const [status, setStatus] = useState("");
   const [error, setError] = useState("");
   const canAssign = role === "ADMIN" || role === "MANAGER";
+  const canUseAI = role === "ADMIN" || role === "MANAGER" || role === "REVIEWER";
 
   const load = async () => {
     try {
@@ -321,6 +326,32 @@ function ComplaintsPage({ role }: { role: Role }) {
   };
 
   useEffect(() => { void load(); }, [canAssign]);
+
+  const selectComplaint = async (complaint: Entity) => {
+    setSelectedComplaint(complaint); setAnalysis(null); setError("");
+    try { setAnalysis(await api.complaintAnalysis<Entity>(complaint.id)); }
+    catch (reason) { if (!(reason instanceof Error) || !reason.message.includes("not found")) setError(reason instanceof Error ? reason.message : "Could not load AI analysis."); }
+  };
+  const runAnalysis = async () => {
+    if (!selectedComplaint) return;
+    setAnalysisLoading(true); setError(""); setStatus("Analyzing complaint…");
+    try { setAnalysis(await api.analyzeComplaint<Entity>(selectedComplaint.id)); await load(); setStatus("AI analysis complete."); }
+    catch (reason) { setStatus("failed"); setError(reason instanceof Error ? reason.message : "Could not analyze this complaint."); }
+    finally { setAnalysisLoading(false); }
+  };
+  const reviewAnalysis = async (decision: "ACCEPT" | "MODIFY" | "DISMISS") => {
+    if (!selectedComplaint) return;
+    setAnalysisLoading(true); setError("");
+    try { setAnalysis(await api.reviewComplaintAnalysis<Entity>(selectedComplaint.id, { decision, reviewer_note: reviewNote })); setStatus("Human review saved."); }
+    catch (reason) { setError(reason instanceof Error ? reason.message : "Could not save the human review."); }
+    finally { setAnalysisLoading(false); }
+  };
+  const bulkAnalyze = async () => {
+    setAnalysisLoading(true); setError("");
+    try { const result = await api.analyzeOpenComplaints<{ analyzed_count: number }>(); await load(); setStatus(`${result.analyzed_count} open complaint(s) analyzed.`); }
+    catch (reason) { setError(reason instanceof Error ? reason.message : "Could not analyze open complaints."); }
+    finally { setAnalysisLoading(false); }
+  };
 
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -370,8 +401,8 @@ function ComplaintsPage({ role }: { role: Role }) {
 
   const openComplaints = complaints.filter((complaint) => !["RESOLVED", "CLOSED"].includes(String(complaint.status)));
   return <div className="row g-3">
-    <div className="col-lg-5"><Panel title="Register complaint"><form onSubmit={submit}><SelectField label="Beneficiary / household" name="beneficiary" options={beneficiaries.map((item) => ({ value: item.id, label: `${beneficiaryLabel(item)} — ${valueOf(item, "program_name") || "Program"}` }))} required /><Field label="Category" name="category" required /><Textarea label="Description" name="description" required /><SelectField label="Severity" name="severity" options={["LOW", "MEDIUM", "HIGH", "CRITICAL"].map((value) => ({ value, label: value }))} required /><button className="btn btn-primary">Register complaint</button></form></Panel><Panel title="Assign, investigate, or resolve"><form onSubmit={updateComplaint}><SelectField label="Open complaint" name="complaint" options={openComplaints.map((item) => ({ value: item.id, label: `${valueOf(item, "category")} — ${valueOf(item, "beneficiary_name") || "Beneficiary"}` }))} required />{canAssign && <SelectField label="Assign to tenant user" name="assigned_to" options={users.map((person) => ({ value: person.id, label: `${person.full_name} (${person.role})` }))} />}<SelectField label="Case status" name="complaint_status" options={["IN_PROGRESS", "RESOLVED", "CLOSED"].map((value) => ({ value, label: value }))} required /><Textarea label="Investigation or resolution note" name="resolution_notes" required /><button className="btn btn-outline-primary" disabled={!openComplaints.length}>Save complaint update</button></form><Message status={status} error={error} /></Panel></div>
-    <div className="col-lg-7"><Panel title="Complaints"><Table headings={role === "SUPPORT" ? ["Beneficiary", "Program", "Household", "Category", "Severity", "Status", "Resolution"] : ["Beneficiary", "Program", "Household", "Category", "Severity", "Assigned to", "Status", "Resolution"]} rows={complaints.map((item) => { const row = [valueOf(item, "beneficiary_name") || "Beneficiary", valueOf(item, "program_name") || "Program", valueOf(item, "household_reference") || "Household", valueOf(item, "category"), <Badge value={valueOf(item, "severity") || "MEDIUM"} />]; return role === "SUPPORT" ? [...row, <Badge value={item.status ?? "OPEN"} />, valueOf(item, "resolution_notes") || "—"] : [...row, valueOf(item, "assigned_to_name") || "Unassigned", <Badge value={item.status ?? "OPEN"} />, valueOf(item, "resolution_notes") || "—"]; })} /></Panel></div>
+    <div className="col-lg-5"><Panel title="Register complaint"><form onSubmit={submit}><SelectField label="Beneficiary / household" name="beneficiary" options={beneficiaries.map((item) => ({ value: item.id, label: `${beneficiaryLabel(item)} — ${valueOf(item, "program_name") || "Program"}` }))} required /><SelectField label="Category" name="category" options={[{ value: "PAYMENT", label: "Payment" }, { value: "ACCESS", label: "Access" }, { value: "ELIGIBILITY", label: "Eligibility" }]} required /><Textarea label="Description" name="description" required /><SelectField label="Severity" name="severity" options={["LOW", "MEDIUM", "HIGH", "CRITICAL"].map((value) => ({ value, label: value }))} required /><button className="btn btn-primary">Register complaint</button></form></Panel><Panel title="Assign, investigate, or resolve"><form onSubmit={updateComplaint}><SelectField label="Open complaint" name="complaint" options={openComplaints.map((item) => ({ value: item.id, label: `${valueOf(item, "category")} — ${valueOf(item, "beneficiary_name") || "Beneficiary"}` }))} required />{canAssign && <SelectField label="Assign to tenant user" name="assigned_to" options={users.map((person) => ({ value: person.id, label: `${person.full_name} (${person.role})` }))} />}<SelectField label="Case status" name="complaint_status" options={["IN_PROGRESS", "RESOLVED", "CLOSED"].map((value) => ({ value, label: value }))} required /><Textarea label="Investigation or resolution note" name="resolution_notes" required /><button className="btn btn-outline-primary" disabled={!openComplaints.length}>Save complaint update</button></form><Message status={status} error={error} /></Panel></div>
+    <div className="col-lg-7"><Panel title="Complaints"><div className="d-flex justify-content-between align-items-center mb-3">{canUseAI && <button className="btn btn-outline-primary" onClick={() => void bulkAnalyze()} disabled={analysisLoading}>Analyze Open Complaints</button>}<span className="form-text">Select a complaint to view details and AI analysis.</span></div><Table headings={["Beneficiary", "Program", "Category", "Severity", "AI", "Status", "View"]} rows={complaints.map((item) => [valueOf(item, "beneficiary_name") || "Beneficiary", valueOf(item, "program_name") || "Program", valueOf(item, "category"), <Badge value={valueOf(item, "severity") || "MEDIUM"} />, <Badge value={item.ai_analysis_available ? "ANALYZED" : "NOT ANALYZED"} />, <Badge value={item.status ?? "OPEN"} />, <button className="btn btn-sm btn-outline-secondary" onClick={() => void selectComplaint(item)}>View</button>])} /></Panel>{selectedComplaint && <Panel title="Complaint details"><dl className="complaint-details"><dt>Complaint ID</dt><dd>{selectedComplaint.id}</dd><dt>Beneficiary</dt><dd>{valueOf(selectedComplaint, "beneficiary_name")}</dd><dt>Program / household</dt><dd>{valueOf(selectedComplaint, "program_name")} / {valueOf(selectedComplaint, "household_reference")}</dd><dt>Category</dt><dd>{valueOf(selectedComplaint, "category")}</dd><dt>Description</dt><dd>{valueOf(selectedComplaint, "description")}</dd><dt>Severity / status</dt><dd>{valueOf(selectedComplaint, "severity")} / {valueOf(selectedComplaint, "status")}</dd><dt>Assigned user</dt><dd>{valueOf(selectedComplaint, "assigned_to_name") || "Unassigned"}</dd><dt>Resolution notes</dt><dd>{valueOf(selectedComplaint, "resolution_notes") || "—"}</dd></dl><Panel title="AI Analysis">{analysisLoading && <p className="form-text">Analyzing complaint…</p>}{!analysis && <div><p className="form-text">No AI analysis is available for this complaint.</p>{canUseAI && <button className="btn btn-primary" onClick={() => void runAnalysis()} disabled={analysisLoading}>Run AI Analysis</button>}</div>}{analysis && <div className="ai-analysis"><div className="d-flex gap-2 flex-wrap mb-3"><Badge value={valueOf(analysis, "severity")} />{analysis.human_review_required && <span className="alert alert-warning py-1 px-2 mb-0">Human Review Required</span>}</div><p><strong>Category:</strong> {valueOf(analysis, "category")}</p><p><strong>Summary:</strong> {valueOf(analysis, "summary")}</p><p><strong>Overall confidence:</strong> {(Number(analysis.confidence ?? 0) * 100).toFixed(0)}%</p><p><strong>Requires escalation:</strong> {analysis.requires_escalation ? "Yes" : "No"}</p><p><strong>Model version:</strong> {valueOf(analysis, "model_version")}</p><h3>Possible causes</h3><ul>{Array.isArray(analysis.possible_causes) && (analysis.possible_causes as Record<string, unknown>[]).map((cause, index) => <li key={index}>{String(cause.cause)} ({(Number(cause.confidence ?? 0) * 100).toFixed(0)}%)</li>)}</ul><h3>Recommended actions</h3><ul>{Array.isArray(analysis.recommended_actions) && (analysis.recommended_actions as string[]).map((action, index) => <li key={index}>{action}</li>)}</ul><h3>Evidence and payment context</h3><pre className="ai-evidence">{JSON.stringify(analysis.evidence ?? {}, null, 2)}</pre>{analysis.review_decision && <p><strong>Human decision:</strong> {valueOf(analysis, "review_decision")} — {valueOf(analysis, "reviewer_note")}</p>}{canUseAI && <><Textarea label="Reviewer note" name="ai-review-note" value={reviewNote} onChange={setReviewNote} /><div className="d-flex gap-2 flex-wrap"><button className="btn btn-success" onClick={() => void reviewAnalysis("ACCEPT")} disabled={analysisLoading}>Accept</button><button className="btn btn-outline-primary" onClick={() => void reviewAnalysis("MODIFY")} disabled={analysisLoading}>Modify</button><button className="btn btn-outline-danger" onClick={() => void reviewAnalysis("DISMISS")} disabled={analysisLoading}>Dismiss</button><button className="btn btn-outline-secondary" onClick={() => void selectComplaint(selectedComplaint)} disabled={analysisLoading}>Refresh AI Analysis</button></div></>}</div>}</Panel></Panel>}</div>
   </div>;
 }
 

@@ -39,6 +39,10 @@ from .views import (
     pipeline_status_view,
     profile_details_view,
     profile_password_view,
+    complaint_ai_analyze_view,
+    complaint_ai_analysis_view,
+    complaint_ai_review_view,
+    complaint_ai_analyze_bulk_view,
 )
 
 router = DefaultRouter()
@@ -75,6 +79,10 @@ urlpatterns = [
     path("pdm/", pdm_view),
     path("pdm/summary/", pdm_summary_view),
     path("sync/registrations/", registration_sync_view),
+    path("ai/complaints/analyze-bulk/", complaint_ai_analyze_bulk_view, name="complaint-ai-analyze-bulk"),
+    path("ai/complaints/<uuid:complaint_id>/analyze/", complaint_ai_analyze_view, name="complaint-ai-analyze"),
+    path("ai/complaints/<uuid:complaint_id>/analysis/", complaint_ai_analysis_view, name="complaint-ai-analysis"),
+    path("ai/complaints/<uuid:complaint_id>/review/", complaint_ai_review_view, name="complaint-ai-review"),
     
     # مسارات الذكاء الاصطناعي والأتمتة
     path("ai/status/", ai_automation_status_view, name="ai-automation-status"),

@@ -121,5 +121,10 @@ export const api = {
     request<T>(`/programs/${programId}/channels/`, { method: "POST", body: JSON.stringify(payload) }),
   simulatePayment: <T>(instructionId: string, outcome: "submit" | "success" | "failure" | "retry" | "reversal") =>
     request<T>(`/payment-instructions/${instructionId}/simulate/`, { method: "POST", body: JSON.stringify({ outcome }) }),
+  analyzeComplaint: <T>(complaintId: string) => request<T>(`/ai/complaints/${complaintId}/analyze/`, { method: "POST" }),
+  complaintAnalysis: <T>(complaintId: string) => request<T>(`/ai/complaints/${complaintId}/analysis/`),
+  reviewComplaintAnalysis: <T>(complaintId: string, payload: { decision: "ACCEPT" | "MODIFY" | "DISMISS"; reviewer_note: string }) =>
+    request<T>(`/ai/complaints/${complaintId}/review/`, { method: "POST", body: JSON.stringify(payload) }),
+  analyzeOpenComplaints: <T>() => request<T>("/ai/complaints/analyze-bulk/", { method: "POST" }),
   clearToken: () => { localStorage.removeItem("hcap_token"); localStorage.removeItem("hcap_refresh_token"); },
 };
