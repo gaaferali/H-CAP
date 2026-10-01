@@ -31,6 +31,7 @@ async function request<T>(path: string, init: RequestInit = {}, retry = true): P
   try {
     response = await fetch(`${apiBase}${path}`, {
       ...init,
+      cache: "no-store",
       headers: {
         "Content-Type": "application/json",
         ...(token ? { Authorization: `Bearer ${token}` } : {}),
@@ -47,7 +48,7 @@ async function request<T>(path: string, init: RequestInit = {}, retry = true): P
       if (refreshed.ok) {
         const payload = (await refreshed.json()) as { access: string };
         localStorage.setItem("hcap_token", payload.access);
-        response = await fetch(`${apiBase}${path}`, { ...init, headers: { "Content-Type": "application/json", Authorization: `Bearer ${payload.access}`, ...init.headers } });
+        response = await fetch(`${apiBase}${path}`, { ...init, cache: "no-store", headers: { "Content-Type": "application/json", Authorization: `Bearer ${payload.access}`, ...init.headers } });
       }
     }
   }
@@ -58,6 +59,26 @@ async function request<T>(path: string, init: RequestInit = {}, retry = true): P
   if (response.status === 204) return undefined as T;
   return response.json() as Promise<T>;
 }
+
+const pendingCreates = new Map<string, Promise<unknown>>();
+const stablePayload = (value: unknown): string => {
+  if (Array.isArray(value)) return `[${value.map(stablePayload).join(",")}]`;
+  if (value && typeof value === "object") {
+    const object = value as Record<string, unknown>;
+    return `{${Object.keys(object).sort().map((key) => `${JSON.stringify(key)}:${stablePayload(object[key])}`).join(",")}}`;
+  }
+  return JSON.stringify(value);
+};
+const operationKey = () => `hcap-${typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(36).slice(2)}`}`;
+const createWithIdempotency = <T,>(resource: string, payload: Record<string, unknown>) => {
+  const key = `${resource}:${stablePayload(payload)}`;
+  const existing = pendingCreates.get(key);
+  if (existing) return existing as Promise<T>;
+  const operation = request<T>(`/${resource}/`, { method: "POST", headers: { "Idempotency-Key": operationKey() }, body: JSON.stringify(payload) })
+    .finally(() => pendingCreates.delete(key));
+  pendingCreates.set(key, operation);
+  return operation;
+};
 
 export type ApiList<T> = T[] | { results: T[] };
 export const listItems = <T,>(result: ApiList<T>) => Array.isArray(result) ? result : result.results;
@@ -81,14 +102,13 @@ export const api = {
   post: <T>(path: string, payload: Record<string, unknown>) => request<T>(path, { method: "POST", body: JSON.stringify(payload) }),
   users: () => request<PlatformUser[] | { results: PlatformUser[] }>("/users/"),
   createUser: (payload: Pick<PlatformUser, "email" | "full_name" | "role"> & { password: string; tenant_id?: string }) =>
-    request<PlatformUser>("/users/", { method: "POST", body: JSON.stringify(payload) }),
+    createWithIdempotency<PlatformUser>("users", payload),
   logout: () => request<{ status: string }>("/auth/logout/", {
     method: "POST",
     body: JSON.stringify({ refresh: localStorage.getItem("hcap_refresh_token") }),
   }),
   list: <T>(resource: string) => request<ApiList<T>>(`/${resource}/`),
-  create: <T>(resource: string, payload: Record<string, unknown>) =>
-    request<T>(`/${resource}/`, { method: "POST", body: JSON.stringify(payload) }),
+  create: <T>(resource: string, payload: Record<string, unknown>) => createWithIdempotency<T>(resource, payload),
   importFile: async <T,>(file: File, programId: string, confirmationToken?: string) => {
     const token = localStorage.getItem("hcap_token");
     const form = new FormData();
@@ -118,7 +138,7 @@ export const api = {
   remove: <T>(resource: string, id: string) =>
     request<T>(`/${resource}/${id}/`, { method: "DELETE" }),
   programChannel: <T>(programId: string, payload: Record<string, unknown>) =>
-    request<T>(`/programs/${programId}/channels/`, { method: "POST", body: JSON.stringify(payload) }),
+    request<T>(`/programs/${programId}/channels/`, { method: "POST", headers: { "Idempotency-Key": operationKey() }, body: JSON.stringify(payload) }),
   simulatePayment: <T>(instructionId: string, outcome: "submit" | "success" | "failure" | "retry" | "reversal") =>
     request<T>(`/payment-instructions/${instructionId}/simulate/`, { method: "POST", body: JSON.stringify({ outcome }) }),
   analyzeComplaint: <T>(complaintId: string) => request<T>(`/ai/complaints/${complaintId}/analyze/`, { method: "POST" }),

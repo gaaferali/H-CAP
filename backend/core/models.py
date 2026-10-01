@@ -2,6 +2,7 @@ import uuid
 
 from django.contrib.auth.models import AbstractBaseUser, BaseUserManager, PermissionsMixin
 from django.core.validators import MinValueValidator
+from django.core.serializers.json import DjangoJSONEncoder
 from django.db import models
 from django.utils import timezone as django_timezone
 
@@ -16,6 +17,21 @@ class Tenant(models.Model):
 
     def __str__(self):
         return self.name
+
+
+class IdempotencyRecord(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    tenant = models.ForeignKey("Tenant", on_delete=models.PROTECT, related_name="idempotency_records")
+    actor = models.ForeignKey("User", on_delete=models.PROTECT, related_name="idempotency_records")
+    endpoint = models.CharField(max_length=255)
+    idempotency_key = models.CharField(max_length=255)
+    request_fingerprint = models.CharField(max_length=64)
+    response_status = models.PositiveSmallIntegerField(default=201)
+    response_body = models.JSONField(default=dict, encoder=DjangoJSONEncoder)
+    created_at = models.DateTimeField(default=django_timezone.now)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["tenant", "actor", "endpoint", "idempotency_key"], name="unique_idempotency_request")]
 
 
 class UserManager(BaseUserManager):
@@ -90,8 +106,8 @@ class Program(models.Model):
     transfer_amount = models.DecimalField(max_digits=18, decimal_places=2, null=True, blank=True, validators=[MinValueValidator(0.01)])
     payment_cycle = models.CharField(max_length=20, choices=Cycle.choices, blank=True)
     status = models.CharField(max_length=20, choices=Status.choices, default=Status.DRAFT)
-    workflow_config = models.JSONField(default=dict, blank=True)
-    country_pack = models.JSONField(default=dict, blank=True)
+    workflow_config = models.JSONField(default=dict, blank=True, encoder=DjangoJSONEncoder)
+    country_pack = models.JSONField(default=dict, blank=True, encoder=DjangoJSONEncoder)
     start_date = models.DateField(null=True, blank=True)
     end_date = models.DateField(null=True, blank=True)
     created_by = models.ForeignKey(User, on_delete=models.PROTECT, related_name="created_programs")
@@ -248,7 +264,7 @@ class PaymentEvent(models.Model):
     provider_transaction_id = models.CharField(max_length=160, blank=True)
     from_status = models.CharField(max_length=20, blank=True)
     to_status = models.CharField(max_length=20)
-    redacted_payload = models.JSONField(default=dict, blank=True)
+    redacted_payload = models.JSONField(default=dict, blank=True, encoder=DjangoJSONEncoder)
     recorded_by = models.ForeignKey(User, on_delete=models.PROTECT, null=True, blank=True, related_name="payment_events")
     created_at = models.DateTimeField(default=django_timezone.now)
 
@@ -297,9 +313,9 @@ class ComplaintAIAnalysis(models.Model):
     category = models.CharField(max_length=120)
     severity = models.CharField(max_length=20, choices=Complaint.Severity.choices)
     summary = models.TextField()
-    possible_causes = models.JSONField(default=list, blank=True)
-    recommended_actions = models.JSONField(default=list, blank=True)
-    evidence = models.JSONField(default=dict, blank=True)
+    possible_causes = models.JSONField(default=list, blank=True, encoder=DjangoJSONEncoder)
+    recommended_actions = models.JSONField(default=list, blank=True, encoder=DjangoJSONEncoder)
+    evidence = models.JSONField(default=dict, blank=True, encoder=DjangoJSONEncoder)
     confidence = models.DecimalField(max_digits=8, decimal_places=4, default=0)
     requires_escalation = models.BooleanField(default=False)
     model_version = models.CharField(max_length=80)
@@ -391,7 +407,7 @@ class Budget(models.Model):
     status = models.CharField(max_length=20, choices=Status.choices, default=Status.DRAFT)
     planned_total = models.DecimalField(max_digits=18, decimal_places=2, default=0)
     actual_total = models.DecimalField(max_digits=18, decimal_places=2, default=0)
-    line_items = models.JSONField(default=list, blank=True)
+    line_items = models.JSONField(default=list, blank=True, encoder=DjangoJSONEncoder)
     created_at = models.DateTimeField(default=django_timezone.now)
 
 
@@ -402,8 +418,8 @@ class AuditEvent(models.Model):
     action = models.CharField(max_length=120)
     entity_type = models.CharField(max_length=120)
     entity_id = models.CharField(max_length=120)
-    before = models.JSONField(default=dict, blank=True)
-    after = models.JSONField(default=dict, blank=True)
+    before = models.JSONField(default=dict, blank=True, encoder=DjangoJSONEncoder)
+    after = models.JSONField(default=dict, blank=True, encoder=DjangoJSONEncoder)
     correlation_id = models.CharField(max_length=120, blank=True)
     created_at = models.DateTimeField(default=django_timezone.now)
 
@@ -427,7 +443,7 @@ class AISignal(models.Model):
     score = models.DecimalField(max_digits=8, decimal_places=4, default=0)
     confidence = models.DecimalField(max_digits=8, decimal_places=4, default=0)
     reason = models.TextField()
-    evidence = models.JSONField(default=dict, blank=True)
+    evidence = models.JSONField(default=dict, blank=True, encoder=DjangoJSONEncoder)
     model_version = models.CharField(max_length=80, blank=True)
     rule_version = models.CharField(max_length=80, blank=True)
     status = models.CharField(max_length=20, choices=Status.choices, default=Status.OPEN)
@@ -452,7 +468,7 @@ class PaymentBatch(models.Model):
     program = models.ForeignKey(Program, on_delete=models.PROTECT, related_name="payment_batches")
     name = models.CharField(max_length=255)
     status = models.CharField(max_length=30, choices=Status.choices, default=Status.DRAFT)
-    provider_response = models.JSONField(default=dict, blank=True)
+    provider_response = models.JSONField(default=dict, blank=True, encoder=DjangoJSONEncoder)
     idempotency_key = models.CharField(max_length=160, unique=True)
     created_by = models.ForeignKey(User, on_delete=models.PROTECT, related_name="created_payment_batches")
     created_at = models.DateTimeField(default=django_timezone.now)
@@ -533,8 +549,8 @@ class AutomationRule(models.Model):
     program = models.ForeignKey(Program, on_delete=models.PROTECT, null=True, blank=True, related_name="automation_rules")
     event_name = models.CharField(max_length=120)
     action_name = models.CharField(max_length=120)
-    conditions = models.JSONField(default=dict, blank=True)
-    action_config = models.JSONField(default=dict, blank=True)
+    conditions = models.JSONField(default=dict, blank=True, encoder=DjangoJSONEncoder)
+    action_config = models.JSONField(default=dict, blank=True, encoder=DjangoJSONEncoder)
     is_active = models.BooleanField(default=False)
     priority = models.PositiveIntegerField(default=100)
     created_at = models.DateTimeField(default=django_timezone.now)
@@ -551,8 +567,8 @@ class AutomationExecution(models.Model):
     tenant = models.ForeignKey(Tenant, on_delete=models.PROTECT, related_name="automation_executions")
     rule = models.ForeignKey(AutomationRule, on_delete=models.PROTECT, related_name="executions")
     idempotency_key = models.CharField(max_length=160, unique=True)
-    event_payload = models.JSONField(default=dict, blank=True)
-    planned_action = models.JSONField(default=dict, blank=True)
+    event_payload = models.JSONField(default=dict, blank=True, encoder=DjangoJSONEncoder)
+    planned_action = models.JSONField(default=dict, blank=True, encoder=DjangoJSONEncoder)
     status = models.CharField(max_length=20, choices=Status.choices, default=Status.BLOCKED)
     created_at = models.DateTimeField(default=django_timezone.now)
 

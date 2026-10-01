@@ -208,6 +208,12 @@ class NFIItemSerializer(serializers.ModelSerializer):
 
 
 class NFIEntitlementSerializer(serializers.ModelSerializer):
+    program_name = serializers.CharField(source="program.name", read_only=True)
+    beneficiary_name = serializers.CharField(source="beneficiary.full_name", read_only=True)
+    beneficiary_number = serializers.CharField(source="beneficiary.number", read_only=True)
+    item_name = serializers.CharField(source="item.name", read_only=True)
+    warehouse_name = serializers.CharField(source="warehouse.name", read_only=True)
+
     class Meta:
         model = NFIEntitlement
         fields = "__all__"
@@ -246,6 +252,9 @@ class StockMovementSerializer(serializers.ModelSerializer):
 
 
 class DistributionEventSerializer(serializers.ModelSerializer):
+    program_name = serializers.CharField(source="program.name", read_only=True)
+    warehouse_name = serializers.CharField(source="warehouse.name", read_only=True)
+
     class Meta:
         model = DistributionEvent
         fields = "__all__"
@@ -265,6 +274,12 @@ class DistributionEventSerializer(serializers.ModelSerializer):
 
 
 class DistributionAllocationSerializer(serializers.ModelSerializer):
+    beneficiary_name = serializers.CharField(source="beneficiary.full_name", read_only=True)
+    beneficiary_number = serializers.CharField(source="beneficiary.number", read_only=True)
+    item_name = serializers.CharField(source="item.name", read_only=True)
+    event_date = serializers.DateField(source="event.event_date", read_only=True)
+    event_location = serializers.CharField(source="event.location", read_only=True)
+
     class Meta:
         model = DistributionAllocation
         fields = "__all__"
@@ -288,6 +303,12 @@ class DistributionAllocationSerializer(serializers.ModelSerializer):
 
 
 class DistributionIssueSerializer(serializers.ModelSerializer):
+    beneficiary_name = serializers.CharField(source="beneficiary.full_name", read_only=True)
+    beneficiary_number = serializers.CharField(source="beneficiary.number", read_only=True)
+    item_name = serializers.CharField(source="item.name", read_only=True)
+    event_date = serializers.DateField(source="event.event_date", read_only=True)
+    event_location = serializers.CharField(source="event.location", read_only=True)
+
     class Meta:
         model = DistributionIssue
         fields = "__all__"
@@ -466,7 +487,19 @@ class EnrollmentSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError("Beneficiary and program must belong to the same tenant")
         if not user.is_superuser and program.tenant_id != user.tenant_id:
             raise serializers.ValidationError("Program belongs to another tenant")
-        modality = attrs.get("assistance_modality", getattr(self.instance, "assistance_modality", Enrollment.AssistanceModality.CASH))
+        submitted_modality = self.initial_data.get("assistance_modality") if self.initial_data is not None else None
+        if submitted_modality:
+            modality = attrs["assistance_modality"]
+        elif self.instance is not None:
+            modality = self.instance.assistance_modality
+        elif program.nfi_enabled and not program.cash_enabled:
+            # Eligibility/enrollment starts before the reviewer chooses a
+            # modality. Infer the only valid modality for NFI-only programs
+            # instead of defaulting to CASH and rejecting the enrollment.
+            modality = Enrollment.AssistanceModality.NFI
+        else:
+            modality = Enrollment.AssistanceModality.CASH
+        attrs["assistance_modality"] = modality
         if modality in {Enrollment.AssistanceModality.CASH, Enrollment.AssistanceModality.CASH_NFI} and not program.cash_enabled:
             raise serializers.ValidationError({"assistance_modality": "Payment is disabled for this program"})
         if modality in {Enrollment.AssistanceModality.NFI, Enrollment.AssistanceModality.CASH_NFI} and not program.nfi_enabled:
@@ -554,6 +587,14 @@ class ComplaintSerializer(serializers.ModelSerializer):
         model = Complaint
         fields = "__all__"
         read_only_fields = ["created_by", "created_at", "resolved_at"]
+
+    def to_internal_value(self, data):
+        # Older import clients used this descriptive label before complaint
+        # categories were constrained to the current operational choices.
+        mutable = data.copy() if hasattr(data, "copy") else dict(data)
+        if str(mutable.get("category", "")).strip().lower() == "information request":
+            mutable["category"] = Complaint.Category.ACCESS
+        return super().to_internal_value(mutable)
 
     def validate_beneficiary(self, beneficiary):
         if beneficiary.household.tenant_id != self.context["request"].user.tenant_id:

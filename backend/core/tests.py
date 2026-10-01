@@ -1,6 +1,11 @@
 from django.test import TestCase
 from django.core.files.uploadedfile import SimpleUploadedFile
+from django.core.serializers.json import DjangoJSONEncoder
 from rest_framework.test import APIClient
+import json
+import uuid
+from decimal import Decimal
+from datetime import datetime, timezone
 
 from datetime import date
 
@@ -28,6 +33,7 @@ from .models import (
     Tenant,
     User,
 )
+from .views import json_safe
 
 
 class TenantBoundaryTests(TestCase):
@@ -1010,6 +1016,65 @@ class ProgramConditionalModalityTests(TestCase):
         self.assertIsNone(program.transfer_amount)
         self.assertEqual(program.payment_cycle, "")
 
+    def test_repeated_idempotency_key_replays_the_program_response(self):
+        payload = self.payload(name="Idempotent NFI response")
+        headers = {"HTTP_IDEMPOTENCY_KEY": "program-nfi-response-1"}
+        first = self.client.post("/api/programs/", payload, format="json", **headers)
+        second = self.client.post("/api/programs/", payload, format="json", **headers)
+        self.assertEqual(first.status_code, 201, first.data)
+        self.assertEqual(second.status_code, 201, second.data)
+        self.assertEqual(first.data["id"], second.data["id"])
+        self.assertEqual(Program.objects.filter(name="Idempotent NFI response").count(), 1)
+
+
+class SharedApiRegressionTests(TestCase):
+    def setUp(self):
+        self.tenant = Tenant.objects.create(name="Shared API Tenant", tenant_type="NGO", default_currency="USD")
+        self.manager = User.objects.create_user("shared-api@example.test", "Shared API Manager", self.tenant, "password", role=User.Role.MANAGER)
+        self.client = APIClient()
+        self.client.force_authenticate(self.manager)
+
+    def program_payload(self, name="Current program"):
+        return {
+            "name": name,
+            "country": "Sudan",
+            "country_code": "SD",
+            "currency": "USD",
+            "currency_type": "PROGRAM",
+            "reporting_currency": "USD",
+            "exchange_rate": "1",
+            "status": "DRAFT",
+            "cash_enabled": False,
+            "nfi_enabled": True,
+            "workflow_config": {},
+            "country_pack": {},
+        }
+
+    def test_json_safe_recursively_converts_uuid_datetime_decimal(self):
+        value = json_safe({"id": uuid.uuid4(), "when": datetime.now(timezone.utc), "amount": Decimal("1.25"), "rows": [uuid.uuid4()]})
+        self.assertIsInstance(value["id"], str)
+        self.assertIsInstance(value["when"], str)
+        self.assertEqual(value["amount"], "1.25")
+        self.assertIsInstance(value["rows"][0], str)
+        json.dumps(value, cls=DjangoJSONEncoder)
+
+    def test_post_get_patch_returns_current_uuid_safe_records(self):
+        created = self.client.post("/api/programs/", self.program_payload(), format="json")
+        self.assertEqual(created.status_code, 201, created.data)
+        program_id = created.data["id"]
+        self.assertIsInstance(program_id, str)
+
+        listed = self.client.get("/api/programs/")
+        self.assertEqual(listed.status_code, 200, listed.data)
+        self.assertEqual(listed["Cache-Control"], "no-store, no-cache, must-revalidate, max-age=0")
+        self.assertTrue(any(row["id"] == program_id for row in listed.data["results"]))
+
+        updated = self.client.patch(f"/api/programs/{program_id}/", {"name": "Renamed program"}, format="json")
+        self.assertEqual(updated.status_code, 200, updated.data)
+        current = self.client.get(f"/api/programs/{program_id}/")
+        self.assertEqual(current.status_code, 200, current.data)
+        self.assertEqual(current.data["name"], "Renamed program")
+
 
 class NFIWorkflowTests(TestCase):
     def setUp(self):
@@ -1029,6 +1094,10 @@ class NFIWorkflowTests(TestCase):
         self.client.force_authenticate(self.finance)
         entitlement_response = self.client.post("/api/nfi-entitlements/", {"beneficiary": str(self.beneficiary.id), "program": str(self.program.id), "warehouse": str(self.warehouse.id), "item": str(self.item.id), "quantity": 3}, format="json")
         self.assertEqual(entitlement_response.status_code, 201, entitlement_response.data)
+        self.assertEqual(entitlement_response.data["program_name"], self.program.name)
+        self.assertEqual(entitlement_response.data["beneficiary_name"], self.beneficiary.full_name)
+        self.assertEqual(entitlement_response.data["item_name"], self.item.name)
+        self.assertEqual(entitlement_response.data["warehouse_name"], self.warehouse.name)
         entitlement = NFIEntitlement.objects.get(id=entitlement_response.data["id"])
         self.item.refresh_from_db()
         self.assertEqual(self.item.available_quantity, 97)
@@ -1036,14 +1105,23 @@ class NFIWorkflowTests(TestCase):
         self.client.force_authenticate(self.manager)
         event_response = self.client.post("/api/distribution-events/", {"program": str(self.program.id), "warehouse": str(self.warehouse.id), "event_date": str(date.today()), "location": "Distribution point", "distribution_team": "Team A", "status": "PLANNED", "entitlement_ids": [str(entitlement.id)]}, format="json")
         self.assertEqual(event_response.status_code, 201, event_response.data)
+        self.assertEqual(event_response.data["program_name"], self.program.name)
+        self.assertEqual(event_response.data["warehouse_name"], self.warehouse.name)
         allocation = DistributionAllocation.objects.get(event_id=event_response.data["id"], entitlement=entitlement)
         self.assertEqual(allocation.planned_quantity, 3)
+        allocation_response = self.client.get("/api/distribution-allocations/")
+        self.assertEqual(allocation_response.status_code, 200, allocation_response.data)
+        allocation_data = allocation_response.data["results"][0]
+        self.assertEqual(allocation_data["beneficiary_name"], self.beneficiary.full_name)
+        self.assertEqual(allocation_data["item_name"], self.item.name)
         self.item.refresh_from_db()
         self.assertEqual(self.item.available_quantity, 97)
 
         self.client.force_authenticate(self.reviewer)
         issue_response = self.client.post("/api/distribution-issues/", {"beneficiary": str(self.beneficiary.id), "entitlement": str(entitlement.id), "item": str(self.item.id), "event": event_response.data["id"], "planned_quantity": 3, "actual_quantity": 3, "delivery_status": "RECEIVED"}, format="json")
         self.assertEqual(issue_response.status_code, 201, issue_response.data)
+        self.assertEqual(issue_response.data["beneficiary_name"], self.beneficiary.full_name)
+        self.assertEqual(issue_response.data["item_name"], self.item.name)
         entitlement.refresh_from_db()
         self.assertEqual(entitlement.status, NFIEntitlement.Status.DISTRIBUTED)
         self.assertTrue(AuditEvent.objects.filter(action="DISTRIBUTION_DELIVERY_RECORDED", entity_id=issue_response.data["id"]).exists())

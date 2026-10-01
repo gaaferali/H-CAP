@@ -49,7 +49,7 @@ from .models import (
     Tenant,
     User,
     HouseholdEligibility, HouseholdEnrollment, CashEntitlement, Warehouse, NFIItem,
-    NFIEntitlement, StockMovement, DistributionEvent, DistributionAllocation, DistributionIssue,
+    NFIEntitlement, StockMovement, DistributionEvent, DistributionAllocation, DistributionIssue, IdempotencyRecord,
 )
 from .serializers import (
     AuditEventSerializer,
@@ -111,11 +111,16 @@ def api_exception_handler(exc, context):
         "error": {
             "code": exc.__class__.__name__,
             "message": message,
-            "fields": details if isinstance(details, dict) else {},
+        "fields": json_safe(details) if isinstance(details, dict) else {},
             "correlation_id": str(uuid.uuid4()),
         }
     }
     return response
+
+
+def json_safe(value):
+    """Return a recursively JSON-native copy of arbitrary model/API data."""
+    return json.loads(json.dumps(value, cls=DjangoJSONEncoder, default=str))
 
 
 def audit(user, action, entity, before=None, after=None, tenant=None):
@@ -127,8 +132,8 @@ def audit(user, action, entity, before=None, after=None, tenant=None):
             action=action,
             entity_type=entity.__class__.__name__,
             entity_id=str(entity.pk),
-            before=json.loads(json.dumps(before or {}, cls=DjangoJSONEncoder)),
-            after=json.loads(json.dumps(after or {}, cls=DjangoJSONEncoder)),
+            before=json_safe(before or {}),
+            after=json_safe(after or {}),
             correlation_id=str(uuid.uuid4()),
         )
 
@@ -163,6 +168,34 @@ class TenantScopedModelViewSet(viewsets.ModelViewSet):
         if self.request.user.is_superuser:
             return self.queryset.all()
         return self.queryset.filter(**self.tenant_filter())
+
+    def create(self, request, *args, **kwargs):
+        key = request.headers.get("Idempotency-Key", "").strip()
+        if not key:
+            return super().create(request, *args, **kwargs)
+        fingerprint = sha256(json.dumps(request.data, sort_keys=True, default=str).encode("utf-8")).hexdigest()
+        with transaction.atomic():
+            record, created = IdempotencyRecord.objects.get_or_create(
+                tenant=request.user.tenant,
+                actor=request.user,
+                endpoint=request.path,
+                idempotency_key=key,
+                defaults={"request_fingerprint": fingerprint, "response_body": {}},
+            )
+            record = IdempotencyRecord.objects.select_for_update().get(pk=record.pk)
+            if not created:
+                if record.request_fingerprint != fingerprint:
+                    raise ValidationError({"idempotency_key": "This idempotency key was already used with different data."})
+                return Response(record.response_body, status=record.response_status)
+            serializer = self.get_serializer(data=request.data)
+            serializer.is_valid(raise_exception=True)
+            self.perform_create(serializer)
+            response = Response(serializer.data, status=status.HTTP_201_CREATED, headers=self.get_success_headers(serializer.data))
+            record.request_fingerprint = fingerprint
+            record.response_status = response.status_code
+            record.response_body = json_safe(response.data)
+            record.save(update_fields=["request_fingerprint", "response_status", "response_body"])
+            return response
 
     def perform_create(self, serializer):
         kwargs = {}
@@ -411,11 +444,32 @@ class ProgramViewSet(RoleProtectedTenantViewSet):
             raise ValidationError("Cash assistance is disabled for this program")
         if request.method == "GET":
             return Response(PaymentChannelConfigSerializer(program.channels.all(), many=True).data)
+        key = request.headers.get("Idempotency-Key", "").strip()
+        fingerprint = sha256(json.dumps(request.data, sort_keys=True, default=str).encode("utf-8")).hexdigest() if key else ""
+        record = None
+        if key:
+            record, created = IdempotencyRecord.objects.get_or_create(
+                tenant=request.user.tenant,
+                actor=request.user,
+                endpoint=request.path,
+                idempotency_key=key,
+                defaults={"request_fingerprint": fingerprint, "response_body": {}},
+            )
+            record = IdempotencyRecord.objects.select_for_update().get(pk=record.pk)
+            if not created:
+                if record.request_fingerprint != fingerprint:
+                    raise ValidationError({"idempotency_key": "This idempotency key was already used with different data."})
+                return Response(record.response_body, status=record.response_status)
         serializer = PaymentChannelConfigSerializer(data={**request.data, "program": str(program.id)})
         serializer.is_valid(raise_exception=True)
         channel = serializer.save()
         audit(request.user, "PAYMENT_CHANNEL_CONFIG_CREATED", channel, after=serializer.data, tenant=program.tenant)
-        return Response(serializer.data, status=status.HTTP_201_CREATED)
+        response = Response(serializer.data, status=status.HTTP_201_CREATED)
+        if record is not None:
+            record.response_status = response.status_code
+            record.response_body = json_safe(response.data)
+            record.save(update_fields=["response_status", "response_body"])
+        return response
 
 
 class ProgramActivityViewSet(RoleProtectedTenantViewSet):
@@ -1402,7 +1456,7 @@ def automation_execute_view(request):
     idempotency_key = request.data.get("idempotency_key")
     if not idempotency_key:
         raise ValidationError({"idempotency_key": "Required to prevent duplicate execution"})
-    event_payload = request.data.get("event_payload", {})
+    event_payload = json_safe(request.data.get("event_payload", {}))
     if not isinstance(event_payload, dict):
         raise ValidationError({"event_payload": "Provide event details as a JSON object."})
     if rule.action_name == "CREATE_REVIEW_TASK":
@@ -1614,6 +1668,22 @@ class DistributionEventViewSet(RoleProtectedTenantViewSet):
 
     @transaction.atomic
     def create(self, request, *args, **kwargs):
+        idempotency_key = request.headers.get("Idempotency-Key", "").strip()
+        idempotency_fingerprint = sha256(json.dumps(request.data, sort_keys=True, default=str).encode("utf-8")).hexdigest() if idempotency_key else ""
+        idempotency_record = None
+        if idempotency_key:
+            idempotency_record, created = IdempotencyRecord.objects.get_or_create(
+                tenant=request.user.tenant,
+                actor=request.user,
+                endpoint=request.path,
+                idempotency_key=idempotency_key,
+                defaults={"request_fingerprint": idempotency_fingerprint, "response_body": {}},
+            )
+            idempotency_record = IdempotencyRecord.objects.select_for_update().get(pk=idempotency_record.pk)
+            if not created:
+                if idempotency_record.request_fingerprint != idempotency_fingerprint:
+                    raise ValidationError({"idempotency_key": "This idempotency key was already used with different data."})
+                return Response(idempotency_record.response_body, status=idempotency_record.response_status)
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         entitlement_ids = request.data.get("entitlement_ids") or []
@@ -1640,7 +1710,12 @@ class DistributionEventViewSet(RoleProtectedTenantViewSet):
             allocations.append(DistributionAllocation.objects.create(beneficiary=entitlement.beneficiary, entitlement=entitlement, event=event, item=entitlement.item, planned_quantity=remaining, allocated_quantity=remaining, status="ALLOCATED", created_by=request.user))
         audit(request.user, "DISTRIBUTION_EVENT_CREATED", event, after={"entitlement_ids": [str(item.id) for item in entitlements], "allocation_ids": [str(item.id) for item in allocations]}, tenant=program.tenant)
         headers = self.get_success_headers(serializer.data)
-        return Response(self.get_serializer(event).data, status=status.HTTP_201_CREATED, headers=headers)
+        response = Response(self.get_serializer(event).data, status=status.HTTP_201_CREATED, headers=headers)
+        if idempotency_record is not None:
+            idempotency_record.response_status = response.status_code
+            idempotency_record.response_body = json_safe(response.data)
+            idempotency_record.save(update_fields=["response_status", "response_body"])
+        return response
 
     def perform_create(self, serializer):
         program = serializer.validated_data["program"]
