@@ -3,7 +3,7 @@ from datetime import date
 from django.test import TestCase
 from rest_framework.test import APIClient
 
-from .models import Beneficiary, Enrollment, Household, NFIItem, Program, Tenant, User, Warehouse
+from .models import Beneficiary, Complaint, Enrollment, Household, NFIItem, Program, Tenant, User, Warehouse
 
 
 class ModalityMatrixTests(TestCase):
@@ -89,3 +89,34 @@ class ModalityMatrixTests(TestCase):
         for index, modality in enumerate(("CASH", "NFI", "CASH_NFI"), start=1):
             response = self.enroll(program, self.make_beneficiary(program, f"BOTH-{index}"), modality)
             self.assertEqual(response.status_code, 201, response.data)
+
+    def test_support_can_use_complaint_ai_without_manager_permissions(self):
+        program = self.make_program("Complaint program", True, False)
+        beneficiary = self.make_beneficiary(program, "CMP-001")
+        complaint = Complaint.objects.create(
+            beneficiary=beneficiary,
+            category=Complaint.Category.ACCESS,
+            description="Assistance access question",
+            created_by=self.manager,
+        )
+        support = User.objects.create_user("support-modality@example.test", "Support", self.tenant, "password", role=User.Role.SUPPORT)
+        self.client.force_authenticate(support)
+        response = self.client.post(f"/api/ai/complaints/{complaint.id}/analyze/", {}, format="json")
+        self.assertEqual(response.status_code, 200, response.data)
+        bulk = self.client.post("/api/ai/complaints/analyze-bulk/", {}, format="json")
+        self.assertEqual(bulk.status_code, 200, bulk.data)
+
+    def test_field_officer_is_denied_new_nfi_and_assistance_endpoints(self):
+        program = self.make_program("Restricted NFI", False, True)
+        field_officer = User.objects.create_user("field-nfi@example.test", "Field Officer", self.tenant, "password", role=User.Role.FIELD_OFFICER)
+        self.client.force_authenticate(field_officer)
+        for endpoint in ("/api/nfi-entitlements/", "/api/distribution-events/", "/api/distribution-issues/"):
+            response = self.client.get(endpoint)
+            self.assertEqual(response.status_code, 403, (endpoint, response.data))
+
+    def test_finance_can_manage_entitlements_but_cannot_review_delivery(self):
+        program = self.make_program("Finance NFI", False, True)
+        finance = User.objects.create_user("finance-nfi@example.test", "Finance", self.tenant, "password", role=User.Role.FINANCE)
+        self.client.force_authenticate(finance)
+        self.assertEqual(self.client.get("/api/nfi-entitlements/").status_code, 200)
+        self.assertEqual(self.client.get("/api/distribution-issues/").status_code, 403)

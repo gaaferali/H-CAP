@@ -747,24 +747,19 @@ const roleRoutes: Record<Route, Role[]> = {
     "ADMIN",
     "MANAGER",
     "REVIEWER",
-    "FINANCE",
-    "FIELD_OFFICER",
     "AUDITOR",
   ],
-  nfi_entitlements: ["ADMIN", "MANAGER", "FINANCE", "FIELD_OFFICER", "AUDITOR"],
+  nfi_entitlements: ["ADMIN", "MANAGER", "FINANCE", "REVIEWER", "AUDITOR"],
   distribution_events: [
     "ADMIN",
     "MANAGER",
-    "FIELD_OFFICER",
-    "FINANCE",
+    "REVIEWER",
     "AUDITOR",
   ],
   delivery_review: [
     "ADMIN",
     "MANAGER",
     "REVIEWER",
-    "FINANCE",
-    "FIELD_OFFICER",
     "AUDITOR",
   ],
   users: ["ADMIN", "MANAGER"],
@@ -844,13 +839,13 @@ const beneficiaryLabel = (beneficiary: Entity) =>
 const enrollmentLabel = (enrollment: Entity) =>
   `${valueOf(enrollment, "beneficiary_number") || "Beneficiary"} — ${valueOf(enrollment, "beneficiary_name") || "Unnamed"} (${valueOf(enrollment, "program_name") || "Program"})`;
 const nfiBeneficiaryLabel = (record: Entity) =>
-  [valueOf(record, "beneficiary_name") || "Beneficiary", valueOf(record, "beneficiary_number")]
+  [valueOf(record, "beneficiary_name") || "Beneficiary", valueOf(record, "national_id_reference")]
     .filter(Boolean)
     .join(" - ");
 const nfiEntitlementLabel = (record: Entity) =>
   `${nfiBeneficiaryLabel(record)} - ${valueOf(record, "item_name") || "NFI item"}`;
 const distributionEventLabel = (record: Entity) =>
-  [valueOf(record, "event_date"), valueOf(record, "event_location") || valueOf(record, "location")]
+  [valueOf(record, "event_date"), valueOf(record, "event_location") || valueOf(record, "location"), valueOf(record, "warehouse_name")]
     .filter(Boolean)
     .join(" - ") || "Distribution event";
 const readableCode = (value: unknown) =>
@@ -1528,6 +1523,7 @@ function ProgramsPage({ role }: { role: Role }) {
         is_active: true,
       });
       formElement.reset();
+      await load();
       setStatus("saved");
     } catch (reason) {
       setStatus("failed");
@@ -3201,7 +3197,7 @@ function ComplaintsPage({ role }: { role: Role }) {
   const [error, setError] = useState("");
   const canAssign = role === "ADMIN" || role === "MANAGER";
   const canUseAI =
-    role === "ADMIN" || role === "MANAGER" || role === "REVIEWER";
+    role === "ADMIN" || role === "MANAGER" || role === "REVIEWER" || role === "SUPPORT";
 
   const load = async () => {
     try {
@@ -5648,8 +5644,8 @@ function AssistancePage({ role }: { role: Role }) {
           <Table
             headings={["Beneficiary", "Item", "Quantity", "Status"]}
             rows={nfi.map((item) => [
-              valueOf(item, "beneficiary"),
-              valueOf(item, "item"),
+              nfiBeneficiaryLabel(item),
+              valueOf(item, "item_name") || "NFI item",
               valueOf(item, "quantity"),
               <Badge value={valueOf(item, "status")} />,
             ])}
@@ -5700,6 +5696,7 @@ function NfiEntitlementsPage({ role }: { role: Role }) {
   const [items, setItems] = useState<Entity[]>([]);
   const [entitlements, setEntitlements] = useState<Entity[]>([]);
   const [programId, setProgramId] = useState("");
+  const [warehouseId, setWarehouseId] = useState("");
   const [status, setStatus] = useState("");
   const [error, setError] = useState("");
   const load = async () => {
@@ -5747,6 +5744,7 @@ function NfiEntitlementsPage({ role }: { role: Role }) {
   const itemOptions = items.filter(
     (row) =>
       valueOf(row, "program") === programId &&
+      valueOf(row, "warehouse") === warehouseId &&
       row.active !== false &&
       Number(row.available_quantity ?? 0) > 0,
   );
@@ -5766,6 +5764,7 @@ function NfiEntitlementsPage({ role }: { role: Role }) {
         status: "ACTIVE",
       });
       formElement.reset();
+      setWarehouseId("");
       await load();
       setStatus("saved");
     } catch (reason) {
@@ -5777,7 +5776,7 @@ function NfiEntitlementsPage({ role }: { role: Role }) {
       );
     }
   };
-  const canWrite = ["ADMIN", "MANAGER", "FINANCE", "FIELD_OFFICER"].includes(
+  const canWrite = ["ADMIN", "MANAGER", "FINANCE"].includes(
     role,
   );
   return (
@@ -5803,7 +5802,10 @@ function NfiEntitlementsPage({ role }: { role: Role }) {
                   label: programLabel(row),
                 }))}
                 value={programId}
-                onChange={setProgramId}
+                onChange={(value) => {
+                  setProgramId(value);
+                  setWarehouseId("");
+                }}
                 required
               />
               <SelectField
@@ -5811,7 +5813,7 @@ function NfiEntitlementsPage({ role }: { role: Role }) {
                 name="beneficiary"
                 options={validEnrollments.map((row) => ({
                   value: valueOf(row, "beneficiary"),
-                  label: `${valueOf(row, "beneficiary_name")} — ${valueOf(row, "assistance_modality")}`,
+                  label: `${nfiBeneficiaryLabel(row)} - ${valueOf(row, "assistance_modality")}`,
                 }))}
                 required
               />
@@ -5822,6 +5824,8 @@ function NfiEntitlementsPage({ role }: { role: Role }) {
                   value: row.id,
                   label: `${row.name} — ${valueOf(row, "location")}`,
                 }))}
+                value={warehouseId}
+                onChange={setWarehouseId}
                 required
               />
               <SelectField
@@ -5966,7 +5970,7 @@ function DistributionEventsPage({ role }: { role: Role }) {
       );
     }
   };
-  const canWrite = ["ADMIN", "MANAGER", "FIELD_OFFICER"].includes(role);
+  const canWrite = ["ADMIN", "MANAGER"].includes(role);
   return (
     <div className="row g-3">
       <div className="col-12">
@@ -6190,7 +6194,7 @@ function ReviewerDeliveryPage({ role }: { role: Role }) {
                 name="event"
                 options={events.map((row) => ({
                   value: row.id,
-                  label: `${valueOf(row, "event_date")} — ${valueOf(row, "location")}`,
+                  label: distributionEventLabel(row),
                 }))}
                 required
               />
@@ -6349,7 +6353,7 @@ function ReviewerNfiDeliveryPage({ role }: { role: Role }) {
                     {nfiEntitlementLabel(selected)}
                   </div>
                   <div>
-                    <strong>Event:</strong> {valueOf(selected, "event")}
+                    <strong>Event:</strong> {distributionEventLabel(selected)}
                   </div>
                   <div>
                     <strong>Planned quantity:</strong>{" "}

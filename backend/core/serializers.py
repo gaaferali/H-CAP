@@ -55,6 +55,11 @@ def national_id_digest(national_id):
     return salted_hmac("hcap.beneficiary.national-id", national_id).hexdigest()
 
 
+def safe_beneficiary_reference(beneficiary):
+    """Use the same privacy-preserving display rule as BeneficiarySerializer."""
+    return f"•••• {beneficiary.number[-4:]}" if beneficiary.number else "Not recorded"
+
+
 def national_id_reference(national_id):
     return f"NID-{national_id_digest(national_id).upper()}"
 
@@ -210,14 +215,17 @@ class NFIItemSerializer(serializers.ModelSerializer):
 class NFIEntitlementSerializer(serializers.ModelSerializer):
     program_name = serializers.CharField(source="program.name", read_only=True)
     beneficiary_name = serializers.CharField(source="beneficiary.full_name", read_only=True)
-    beneficiary_number = serializers.CharField(source="beneficiary.number", read_only=True)
+    national_id_reference = serializers.SerializerMethodField()
     item_name = serializers.CharField(source="item.name", read_only=True)
-    warehouse_name = serializers.CharField(source="warehouse.name", read_only=True)
+    warehouse_name = serializers.CharField(source="warehouse.name", read_only=True, allow_null=True)
 
     class Meta:
         model = NFIEntitlement
         fields = "__all__"
         read_only_fields = ["created_by", "created_at", "updated_at"]
+
+    def get_national_id_reference(self, entitlement):
+        return safe_beneficiary_reference(entitlement.beneficiary)
 
     def validate(self, attrs):
         beneficiary = attrs.get("beneficiary") or self.instance.beneficiary
@@ -275,8 +283,10 @@ class DistributionEventSerializer(serializers.ModelSerializer):
 
 class DistributionAllocationSerializer(serializers.ModelSerializer):
     beneficiary_name = serializers.CharField(source="beneficiary.full_name", read_only=True)
-    beneficiary_number = serializers.CharField(source="beneficiary.number", read_only=True)
+    national_id_reference = serializers.SerializerMethodField()
     item_name = serializers.CharField(source="item.name", read_only=True)
+    program_name = serializers.CharField(source="event.program.name", read_only=True)
+    warehouse_name = serializers.CharField(source="event.warehouse.name", read_only=True, allow_null=True)
     event_date = serializers.DateField(source="event.event_date", read_only=True)
     event_location = serializers.CharField(source="event.location", read_only=True)
 
@@ -284,6 +294,9 @@ class DistributionAllocationSerializer(serializers.ModelSerializer):
         model = DistributionAllocation
         fields = "__all__"
         read_only_fields = ["created_by", "created_at"]
+
+    def get_national_id_reference(self, allocation):
+        return safe_beneficiary_reference(allocation.beneficiary)
 
     def validate(self, attrs):
         entitlement = attrs.get("entitlement") or self.instance.entitlement
@@ -304,8 +317,10 @@ class DistributionAllocationSerializer(serializers.ModelSerializer):
 
 class DistributionIssueSerializer(serializers.ModelSerializer):
     beneficiary_name = serializers.CharField(source="beneficiary.full_name", read_only=True)
-    beneficiary_number = serializers.CharField(source="beneficiary.number", read_only=True)
+    national_id_reference = serializers.SerializerMethodField()
     item_name = serializers.CharField(source="item.name", read_only=True)
+    program_name = serializers.CharField(source="event.program.name", read_only=True)
+    warehouse_name = serializers.CharField(source="event.warehouse.name", read_only=True, allow_null=True)
     event_date = serializers.DateField(source="event.event_date", read_only=True)
     event_location = serializers.CharField(source="event.location", read_only=True)
 
@@ -313,6 +328,9 @@ class DistributionIssueSerializer(serializers.ModelSerializer):
         model = DistributionIssue
         fields = "__all__"
         read_only_fields = ["created_by", "created_at"]
+
+    def get_national_id_reference(self, issue):
+        return safe_beneficiary_reference(issue.beneficiary)
 
     def validate(self, attrs):
         entitlement = attrs.get("entitlement") or self.instance.entitlement
@@ -459,6 +477,7 @@ class BeneficiarySerializer(serializers.ModelSerializer):
         return household.client_generated_id or f"HH-{str(household.id).split('-')[0].upper()}"
 
     def get_national_id_reference(self, beneficiary):
+        return safe_beneficiary_reference(beneficiary)
         return f"•••• {beneficiary.number[-4:]}" if beneficiary.number else "Not recorded"
 
     def get_masked_phone(self, beneficiary):
@@ -469,6 +488,7 @@ class BeneficiarySerializer(serializers.ModelSerializer):
 class EnrollmentSerializer(serializers.ModelSerializer):
     beneficiary_name = serializers.CharField(source="beneficiary.full_name", read_only=True)
     beneficiary_number = serializers.SerializerMethodField()
+    national_id_reference = serializers.SerializerMethodField()
     program_name = serializers.CharField(source="program.name", read_only=True)
 
     class Meta:
@@ -478,6 +498,9 @@ class EnrollmentSerializer(serializers.ModelSerializer):
 
     def get_beneficiary_number(self, enrollment):
         return f"•••• {enrollment.beneficiary.number[-4:]}" if enrollment.beneficiary.number else "Not recorded"
+
+    def get_national_id_reference(self, enrollment):
+        return safe_beneficiary_reference(enrollment.beneficiary)
 
     def validate(self, attrs):
         beneficiary = attrs.get("beneficiary") or self.instance.beneficiary

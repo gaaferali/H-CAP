@@ -438,6 +438,7 @@ class ProgramViewSet(RoleProtectedTenantViewSet):
             raise PermissionDenied("Your role has read-only access to this resource")
 
     @action(detail=True, methods=["get", "post"], url_path="channels")
+    @transaction.atomic
     def channels(self, request, pk=None):
         program = self.get_object()
         if not program.cash_enabled:
@@ -644,8 +645,8 @@ class ComplaintViewSet(RoleProtectedTenantViewSet):
     allowed_roles = {User.Role.ADMIN, User.Role.SUPPORT, User.Role.MANAGER}
 
 
-COMPLAINT_AI_READ_ROLES = {User.Role.ADMIN, User.Role.MANAGER, User.Role.REVIEWER, User.Role.AUDITOR}
-COMPLAINT_AI_WRITE_ROLES = {User.Role.ADMIN, User.Role.MANAGER, User.Role.REVIEWER}
+COMPLAINT_AI_READ_ROLES = {User.Role.ADMIN, User.Role.MANAGER, User.Role.REVIEWER, User.Role.SUPPORT, User.Role.AUDITOR}
+COMPLAINT_AI_WRITE_ROLES = {User.Role.ADMIN, User.Role.MANAGER, User.Role.REVIEWER, User.Role.SUPPORT}
 
 
 def complaint_ai_scope(request, complaint_id):
@@ -1573,7 +1574,7 @@ class CashEntitlementViewSet(RoleProtectedTenantViewSet):
 class WarehouseViewSet(RoleProtectedTenantViewSet):
     queryset = Warehouse.objects.select_related("program")
     serializer_class = WarehouseSerializer
-    allowed_roles = {User.Role.ADMIN, User.Role.MANAGER, User.Role.FIELD_OFFICER, User.Role.AUDITOR}
+    allowed_roles = {User.Role.ADMIN, User.Role.MANAGER, User.Role.REVIEWER, User.Role.FINANCE, User.Role.AUDITOR}
     write_roles = {User.Role.ADMIN, User.Role.MANAGER}
     tenant_field = "program__tenant"
 
@@ -1590,7 +1591,7 @@ class WarehouseViewSet(RoleProtectedTenantViewSet):
 class NFIItemViewSet(RoleProtectedTenantViewSet):
     queryset = NFIItem.objects.select_related("program", "warehouse")
     serializer_class = NFIItemSerializer
-    allowed_roles = {User.Role.ADMIN, User.Role.MANAGER, User.Role.FIELD_OFFICER, User.Role.FINANCE, User.Role.AUDITOR}
+    allowed_roles = {User.Role.ADMIN, User.Role.MANAGER, User.Role.REVIEWER, User.Role.FINANCE, User.Role.AUDITOR}
     write_roles = {User.Role.ADMIN, User.Role.MANAGER}
     tenant_field = "program__tenant"
 
@@ -1611,10 +1612,10 @@ class NFIItemViewSet(RoleProtectedTenantViewSet):
 
 
 class NFIEntitlementViewSet(RoleProtectedTenantViewSet):
-    queryset = NFIEntitlement.objects.select_related("beneficiary", "program", "item")
+    queryset = NFIEntitlement.objects.select_related("beneficiary", "program", "item", "warehouse")
     serializer_class = NFIEntitlementSerializer
-    allowed_roles = {User.Role.ADMIN, User.Role.FINANCE, User.Role.MANAGER, User.Role.FIELD_OFFICER, User.Role.AUDITOR}
-    write_roles = {User.Role.ADMIN, User.Role.FINANCE, User.Role.MANAGER, User.Role.FIELD_OFFICER}
+    allowed_roles = {User.Role.ADMIN, User.Role.FINANCE, User.Role.MANAGER, User.Role.REVIEWER, User.Role.AUDITOR}
+    write_roles = {User.Role.ADMIN, User.Role.FINANCE, User.Role.MANAGER}
     tenant_field = "program__tenant"
 
     def get_queryset(self):
@@ -1651,16 +1652,16 @@ class NFIEntitlementViewSet(RoleProtectedTenantViewSet):
 class StockMovementViewSet(RoleProtectedTenantViewSet):
     queryset = StockMovement.objects.select_related("program", "warehouse", "item")
     serializer_class = StockMovementSerializer
-    allowed_roles = {User.Role.ADMIN, User.Role.MANAGER, User.Role.FIELD_OFFICER, User.Role.FINANCE, User.Role.AUDITOR}
+    allowed_roles = {User.Role.ADMIN, User.Role.MANAGER, User.Role.REVIEWER, User.Role.AUDITOR}
     write_roles = {User.Role.ADMIN, User.Role.MANAGER}
     tenant_field = "program__tenant"
 
 
 class DistributionEventViewSet(RoleProtectedTenantViewSet):
-    queryset = DistributionEvent.objects.select_related("program")
+    queryset = DistributionEvent.objects.select_related("program", "warehouse")
     serializer_class = DistributionEventSerializer
-    allowed_roles = {User.Role.ADMIN, User.Role.MANAGER, User.Role.FIELD_OFFICER, User.Role.FINANCE, User.Role.AUDITOR}
-    write_roles = {User.Role.ADMIN, User.Role.MANAGER, User.Role.FIELD_OFFICER}
+    allowed_roles = {User.Role.ADMIN, User.Role.MANAGER, User.Role.REVIEWER, User.Role.AUDITOR}
+    write_roles = {User.Role.ADMIN, User.Role.MANAGER}
     tenant_field = "program__tenant"
 
     def get_queryset(self):
@@ -1730,10 +1731,10 @@ class DistributionEventViewSet(RoleProtectedTenantViewSet):
 
 
 class DistributionAllocationViewSet(RoleProtectedTenantViewSet):
-    queryset = DistributionAllocation.objects.select_related("beneficiary", "entitlement", "event", "item")
+    queryset = DistributionAllocation.objects.select_related("beneficiary", "entitlement", "event__program", "event__warehouse", "item")
     serializer_class = DistributionAllocationSerializer
-    allowed_roles = {User.Role.ADMIN, User.Role.MANAGER, User.Role.FIELD_OFFICER, User.Role.FINANCE, User.Role.AUDITOR}
-    write_roles = {User.Role.ADMIN, User.Role.MANAGER, User.Role.FIELD_OFFICER}
+    allowed_roles = {User.Role.ADMIN, User.Role.MANAGER, User.Role.REVIEWER, User.Role.AUDITOR}
+    write_roles = {User.Role.ADMIN, User.Role.MANAGER}
     tenant_field = "event__program__tenant"
 
     def perform_create(self, serializer):
@@ -1751,9 +1752,9 @@ class DistributionAllocationViewSet(RoleProtectedTenantViewSet):
 
 
 class DistributionIssueViewSet(RoleProtectedTenantViewSet):
-    queryset = DistributionIssue.objects.select_related("beneficiary", "entitlement", "event", "item")
+    queryset = DistributionIssue.objects.select_related("beneficiary", "entitlement", "event__program", "event__warehouse", "item")
     serializer_class = DistributionIssueSerializer
-    allowed_roles = {User.Role.ADMIN, User.Role.MANAGER, User.Role.REVIEWER, User.Role.FIELD_OFFICER, User.Role.FINANCE, User.Role.AUDITOR}
+    allowed_roles = {User.Role.ADMIN, User.Role.MANAGER, User.Role.REVIEWER, User.Role.AUDITOR}
     write_roles = {User.Role.ADMIN, User.Role.MANAGER, User.Role.REVIEWER}
     tenant_field = "event__program__tenant"
 
