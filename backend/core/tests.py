@@ -974,6 +974,43 @@ class DeletionAccessTests(TestCase):
         self.assertTrue(Program.objects.filter(id=self.other_program.id).exists())
 
 
+class ProgramConditionalModalityTests(TestCase):
+    def setUp(self):
+        self.tenant = Tenant.objects.create(name="Conditional Tenant", tenant_type="NGO", default_currency="USD")
+        self.manager = User.objects.create_user("conditional-manager@example.test", "Conditional Manager", self.tenant, "password", role=User.Role.MANAGER)
+        self.client = APIClient()
+        self.client.force_authenticate(self.manager)
+
+    def payload(self, **overrides):
+        payload = {"name": "Conditional response", "country": "Sudan", "country_code": "SD", "currency": "USD", "currency_type": "PROGRAM", "reporting_currency": "USD", "exchange_rate": "1", "status": "DRAFT", "cash_enabled": False, "nfi_enabled": True, "other_assistance_enabled": False, "workflow_config": {}, "country_pack": {}}
+        payload.update(overrides)
+        return payload
+
+    def test_nfi_only_program_does_not_require_cash_fields(self):
+        response = self.client.post("/api/programs/", self.payload(), format="json")
+        self.assertEqual(response.status_code, 201, response.data)
+        program = Program.objects.get(id=response.data["id"])
+        self.assertIsNone(program.transfer_amount)
+        self.assertEqual(program.payment_cycle, "")
+
+    def test_cash_enabled_program_requires_valid_cash_fields(self):
+        missing = self.client.post("/api/programs/", self.payload(name="Missing cash", cash_enabled=True), format="json")
+        self.assertEqual(missing.status_code, 400)
+        self.assertIn("transfer_amount", missing.data["error"]["fields"])
+        below_minimum = self.client.post("/api/programs/", self.payload(name="Small cash", cash_enabled=True, transfer_amount="0", payment_cycle="ONE_TIME"), format="json")
+        self.assertEqual(below_minimum.status_code, 400)
+        valid = self.client.post("/api/programs/", self.payload(name="Cash and NFI", cash_enabled=True, transfer_amount="100.00", payment_cycle="ONE_TIME"), format="json")
+        self.assertEqual(valid.status_code, 201, valid.data)
+
+    def test_switching_cash_off_clears_cash_fields(self):
+        program = Program.objects.create(tenant=self.tenant, name="Existing cash", country="Sudan", currency="USD", transfer_amount="50.00", payment_cycle=Program.Cycle.MONTHLY, cash_enabled=True, created_by=self.manager)
+        response = self.client.patch(f"/api/programs/{program.id}/", {"cash_enabled": False, "nfi_enabled": True, "transfer_amount": None, "payment_cycle": ""}, format="json")
+        self.assertEqual(response.status_code, 200, response.data)
+        program.refresh_from_db()
+        self.assertIsNone(program.transfer_amount)
+        self.assertEqual(program.payment_cycle, "")
+
+
 class NFIWorkflowTests(TestCase):
     def setUp(self):
         self.tenant = Tenant.objects.create(name="NFI Tenant", tenant_type="NGO", default_currency="USD")

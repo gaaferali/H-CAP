@@ -162,18 +162,18 @@ function Message({ status, error }: { status: string; error: string }) {
   return <div className="status-message mt-3" aria-live="polite">{status === "saving" ? translate("Saving. Do not submit again.") : status === "saved" ? translate("Saved successfully.") : ""}</div>;
 }
 
-function Field({ label, name, type = "text", required = false, help, defaultValue }: { label: string; name: string; type?: string; required?: boolean; help?: string; defaultValue?: string }) {
+function Field({ label, name, type = "text", required = false, help, defaultValue, disabled = false }: { label: string; name: string; type?: string; required?: boolean; help?: string; defaultValue?: string; disabled?: boolean }) {
   const translate = useTranslation();
   const id = `field-${name}`;
   const paymentOnly = ["transfer_amount", "payment_cycle", "planned_total"].includes(name);
-  return <div className={`mb-3 ${paymentOnly ? "payment-only-field" : ""}`}><label className="form-label" htmlFor={id}>{translate(label)}{required && !paymentOnly && " *"}</label><input className="form-control" id={id} name={name} type={type} required={required && !paymentOnly} defaultValue={defaultValue} />{help && <div className="form-text">{translate(help)}</div>}</div>;
+  return <div className={`mb-3 ${paymentOnly ? "payment-only-field" : ""}`}><label className="form-label" htmlFor={id}>{translate(label)}{required && !paymentOnly && " *"}</label><input className="form-control" id={id} name={name} type={type} required={required && !paymentOnly} defaultValue={defaultValue} disabled={disabled} />{help && <div className="form-text">{translate(help)}</div>}</div>;
 }
 
 function SelectField({ label, name, options, required = false, value, onChange, disabled = false }: { label: string; name: string; options: Option[]; required?: boolean; value?: string; onChange?: (value: string) => void; disabled?: boolean }) {
   const translate = useTranslation();
   const id = `field-${name}`;
   const paymentOnly = ["payment_cycle"].includes(name);
-  return <div className={`mb-3 ${paymentOnly ? "payment-only-field" : ""}`}><label className="form-label" htmlFor={id}>{translate(label)}{required && !paymentOnly && " *"}</label><select className="form-select" id={id} name={name} required={required && !paymentOnly} value={value} onChange={(event) => onChange?.(event.target.value)} disabled={disabled}><option value="">{translate("Select…")}</option>{options.map((option) => <option key={option.value} value={option.value}>{translate(option.label)}</option>)}</select></div>;
+  return <div className={`mb-3 ${paymentOnly ? "payment-only-field" : ""}`}><label className="form-label" htmlFor={id}>{translate(label)}{required && " *"}</label><select className="form-select" id={id} name={name} required={required} value={value} onChange={(event) => onChange?.(event.target.value)} disabled={disabled}><option value="">{translate("Select…")}</option>{options.map((option) => <option key={option.value} value={option.value}>{translate(option.label)}</option>)}</select></div>;
 }
 
 function Textarea({ label, name, required = false, help, placeholder, value, onChange }: { label: string; name: string; required?: boolean; help?: string; placeholder?: string; value?: string; onChange?: (value: string) => void }) {
@@ -266,10 +266,128 @@ function ProgramSetup({ programs, reload }: { programs: Entity[]; reload: () => 
   const program = programs.find((row) => row.id === selected);
   const loadSetup = async () => { if (!selected || !program?.nfi_enabled) { setWarehouses([]); setItems([]); return; } try { const [warehouseResponse, itemResponse] = await Promise.all([api.list<Entity>("warehouses"), api.list<Entity>("nfi-items")]); setWarehouses(listItems(warehouseResponse).filter((row) => valueOf(row, "program") === selected)); setItems(listItems(itemResponse).filter((row) => valueOf(row, "program") === selected)); } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not load NFI setup."); } };
   useEffect(() => { void loadSetup(); }, [selected, program?.nfi_enabled]);
-  const create = async (event: FormEvent<HTMLFormElement>) => { event.preventDefault(); const form = new FormData(event.currentTarget); const cash = form.get("cash_enabled") === "on"; const nfi = form.get("nfi_enabled") === "on"; const other = form.get("other_assistance_enabled") === "on"; setStatus("saving"); setError(""); try { const created = await api.create<Entity>("programs", { name: form.get("name"), country: form.get("country"), country_code: form.get("country_code"), currency: form.get("currency"), reporting_currency: form.get("reporting_currency"), currency_type: "PROGRAM", exchange_rate: "1", transfer_amount: cash ? form.get("transfer_amount") : "0.01", payment_cycle: cash ? form.get("payment_cycle") : "ONE_TIME", status: "DRAFT", cash_enabled: cash, nfi_enabled: nfi, other_assistance_enabled: other, workflow_config: { payment_enabled: cash }, country_pack: {} }); await api.create("budgets", { program: created.id, currency: form.get("currency"), status: "DRAFT", planned_total: form.get("planned_total") || "0", actual_total: "0", line_items: [] }); event.currentTarget.reset(); await reload(); setSelected(created.id); setStatus("saved"); } catch (reason) { setStatus("failed"); setError(reason instanceof Error ? reason.message : "Could not create the program."); } };
+  const create = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+
+    const formElement = event.currentTarget;
+    const form = new FormData(formElement);
+
+    const value = (name: string) => String(form.get(name) ?? "").trim();
+
+  // These names match the checkbox names in your JSX.
+    const paymentEnabled = form.has("cash_enabled");
+    const nfiEnabled = form.has("nfi_enabled");
+    const otherAssistanceEnabled = form.has(
+    "other_assistance_enabled"
+    );
+
+    setStatus("saving");
+    setError("");
+    
+    try {
+    // Require these fields only for Payment / Cash.
+      if (paymentEnabled) {
+        if (!value("transfer_amount")) {
+          throw new Error("Transfer amount is required when payment is enabled.");
+        }
+
+        if (!value("payment_cycle")) {
+          throw new Error("Payment cycle is required when payment is enabled.");
+        }
+
+        if (!value("planned_total")) {
+          throw new Error("Budget envelope is required when payment is enabled.");
+        }
+      }
+
+     const created = await api.create<Entity>("programs", {
+        name: value("name"),
+        country: value("country"),
+        country_code: value("country_code"),
+        currency: value("currency"),
+        reporting_currency: value("reporting_currency"),
+        currency_type: "PROGRAM",
+        exchange_rate: "1",
+
+        ...(paymentEnabled
+          ? {
+            transfer_amount: value("transfer_amount"),
+            payment_cycle: value("payment_cycle"),
+          }
+        : {
+            transfer_amount: null,
+            payment_cycle: "",
+          }),
+
+        status: "DRAFT",
+        cash_enabled: paymentEnabled,
+        nfi_enabled: nfiEnabled,
+        other_assistance_enabled: otherAssistanceEnabled,
+
+        workflow_config: {
+          payment_enabled: paymentEnabled,
+        },
+
+        country_pack: {},
+      });
+
+    // Create a budget only for Payment / Cash programs.
+      if (paymentEnabled) {
+        await api.create("budgets", {
+          program: created.id,
+          currency: value("currency"),
+          status: "DRAFT",
+          planned_total: value("planned_total"),
+          actual_total: "0",
+         line_items: [],
+        });
+      }
+
+      formElement.reset();
+
+      await reload();
+     setSelected(created.id);
+      setStatus("saved");
+   } catch (reason) {
+      setStatus("failed");
+
+      setError(
+       reason instanceof Error
+         ? reason.message
+          : "Could not create the program."
+      );
+   }
+  };
+
   const createWarehouse = async (event: FormEvent<HTMLFormElement>) => { event.preventDefault(); if (!selected) return; const form = new FormData(event.currentTarget); try { await api.create("warehouses", { program: selected, name: form.get("warehouse_name"), location: form.get("warehouse_location"), person_in_charge: form.get("person_in_charge"), responsible_team: form.get("responsible_team"), active: true }); event.currentTarget.reset(); await loadSetup(); setStatus("saved"); } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not save the warehouse."); } };
   const createItem = async (event: FormEvent<HTMLFormElement>) => { event.preventDefault(); if (!selected) return; const form = new FormData(event.currentTarget); const quantity = Number(form.get("initial_quantity")); try { await api.create("nfi-items", { program: selected, warehouse: form.get("warehouse"), name: form.get("item_name"), item_type: form.get("item_type"), unit: form.get("unit"), description: form.get("description"), initial_quantity: quantity, available_quantity: quantity, active: true }); event.currentTarget.reset(); await loadSetup(); setStatus("saved"); } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not save the NFI item."); } };
-  return <div className="row g-3"><div className="col-xl-7"><Panel title="Create program"><form onSubmit={create}><div className="row"><div className="col-md-6"><Field label="Program name" name="name" required /></div><div className="col-md-6"><Field label="Country" name="country" required /></div><div className="col-md-4"><Field label="Country code" name="country_code" required /></div><div className="col-md-4"><Field label="Program currency" name="currency" required /></div><div className="col-md-4"><Field label="Reporting currency" name="reporting_currency" required /></div><div className="col-md-6"><Field label="Transfer amount" name="transfer_amount" type="number" required /></div><div className="col-md-3"><SelectField label="Payment cycle" name="payment_cycle" options={["ONE_TIME", "MONTHLY", "QUARTERLY"].map((value) => ({ value, label: value }))} required /></div><div className="col-md-3"><Field label="Budget envelope" name="planned_total" type="number" required /></div></div><fieldset className="mb-3"><legend className="fs-6">Assistance modalities</legend>{[["cash_enabled", "Payment / Cash", true], ["nfi_enabled", "NFI / In-Kind", false], ["other_assistance_enabled", "Other Assistance / Third Modality", false]].map(([name, label, checked]) => <div className="form-check" key={String(name)}><input className="form-check-input" id={String(name)} name={String(name)} type="checkbox" defaultChecked={Boolean(checked)} /><label className="form-check-label" htmlFor={String(name)}>{String(label)}</label></div>)}</fieldset><button className="btn btn-primary">Create program and budget</button></form><Message status={status} error={error} /></Panel></div><div className="col-xl-5"><Panel title="Program continuation"><SelectField label="Program" name="setup-program" options={programs.map((row) => ({ value: row.id, label: programLabel(row) }))} value={selected} onChange={setSelected} /><p className="form-text">Payment and NFI setup appear only when enabled for the selected program.</p>{program?.cash_enabled && <p className="text-success">Payment configuration is enabled; use the existing Payments page for channel and simulator setup.</p>}{program?.other_assistance_enabled && <div className="alert alert-info">Other Assistance / Third Modality — Coming Soon / Not Implemented.</div>}</Panel></div>{program?.nfi_enabled && <><div className="col-xl-5"><Panel title="Warehouses"><form onSubmit={createWarehouse}><Field label="Warehouse name" name="warehouse_name" required /><Field label="Location" name="warehouse_location" required /><Field label="Person in charge" name="person_in_charge" /><Field label="Responsible team" name="responsible_team" /><button className="btn btn-outline-primary">Add warehouse</button></form><Table headings={["Warehouse", "Location", "Status"]} rows={warehouses.map((row) => [row.name ?? "Warehouse", valueOf(row, "location"), <Badge value={String(row.active) === "true" ? "ACTIVE" : "INACTIVE"} />])} /></Panel></div><div className="col-xl-7"><Panel title="NFI catalogue and initial stock"><form onSubmit={createItem}><SelectField label="Warehouse" name="warehouse" options={warehouses.map((row) => ({ value: row.id, label: row.name ?? "Warehouse" }))} required /><Field label="Item name" name="item_name" required /><Field label="Item type or category" name="item_type" /><Field label="Unit" name="unit" required /><Field label="Description" name="description" /><Field label="Initial available quantity" name="initial_quantity" type="number" required /><button className="btn btn-outline-primary">Add item and opening stock</button></form><Table headings={["Item", "Initial stock", "Available"]} rows={items.map((row) => [row.name ?? "Item", valueOf(row, "initial_quantity"), valueOf(row, "available_quantity")])} /></Panel></div></>}{selected && !program?.nfi_enabled && <div className="col-12"><Panel title="NFI setup"><p className="form-text">NFI is disabled for this program; no warehouse or item setup is shown.</p></Panel></div>}{error && <div className="col-12"><Message status={status} error={error} /></div>}</div>;
+  return <div className="row g-3"><div className="col-xl-7"><Panel title="Create program"><form onSubmit={create}><div className="row"><div className="col-md-6"><Field label="Program name" name="name" required /></div><div className="col-md-6"><Field label="Country" name="country" required /></div><div className="col-md-4"><Field label="Country code" name="country_code" required /></div><div className="col-md-4"><Field label="Program currency" name="currency" required /></div><div className="col-md-4"><Field label="Reporting currency" name="reporting_currency" required /></div><div className="col-md-6">
+  <Field
+    label="Transfer amount"
+    name="transfer_amount"
+    type="number"
+  />
+</div>
+
+<div className="col-md-3">
+  <SelectField
+    label="Payment cycle"
+    name="payment_cycle"
+    options={["ONE_TIME", "MONTHLY", "QUARTERLY"].map((value) => ({
+      value,
+      label: value,
+    }))}
+  />
+</div>
+
+<div className="col-md-3">
+  <Field
+    label="Budget envelope"
+    name="planned_total"
+    type="number"
+  />
+</div>
+</div><fieldset className="mb-3"><legend className="fs-6">Assistance modalities</legend>{[["cash_enabled", "Payment / Cash", true], ["nfi_enabled", "NFI / In-Kind", false], ["other_assistance_enabled", "Other Assistance / Third Modality", false]].map(([name, label, checked]) => <div className="form-check" key={String(name)}><input className="form-check-input" id={String(name)} name={String(name)} type="checkbox" defaultChecked={Boolean(checked)} /><label className="form-check-label" htmlFor={String(name)}>{String(label)}</label></div>)}</fieldset><button className="btn btn-primary">Create program and budget</button></form><Message status={status} error={error} /></Panel></div><div className="col-xl-5"><Panel title="Program continuation"><SelectField label="Program" name="setup-program" options={programs.map((row) => ({ value: row.id, label: programLabel(row) }))} value={selected} onChange={setSelected} /><p className="form-text">Payment and NFI setup appear only when enabled for the selected program.</p>{program?.cash_enabled && <p className="text-success">Payment configuration is enabled; use the existing Payments page for channel and simulator setup.</p>}{program?.other_assistance_enabled && <div className="alert alert-info">Other Assistance / Third Modality — Coming Soon / Not Implemented.</div>}</Panel></div>{program?.nfi_enabled && <><div className="col-xl-5"><Panel title="Warehouses"><form onSubmit={createWarehouse}><Field label="Warehouse name" name="warehouse_name" required /><Field label="Location" name="warehouse_location" required /><Field label="Person in charge" name="person_in_charge" /><Field label="Responsible team" name="responsible_team" /><button className="btn btn-outline-primary">Add warehouse</button></form><Table headings={["Warehouse", "Location", "Status"]} rows={warehouses.map((row) => [row.name ?? "Warehouse", valueOf(row, "location"), <Badge value={String(row.active) === "true" ? "ACTIVE" : "INACTIVE"} />])} /></Panel></div><div className="col-xl-7"><Panel title="NFI catalogue and initial stock"><form onSubmit={createItem}><SelectField label="Warehouse" name="warehouse" options={warehouses.map((row) => ({ value: row.id, label: row.name ?? "Warehouse" }))} required /><Field label="Item name" name="item_name" required /><Field label="Item type or category" name="item_type" /><Field label="Unit" name="unit" required /><Field label="Description" name="description" /><Field label="Initial available quantity" name="initial_quantity" type="number" required /><button className="btn btn-outline-primary">Add item and opening stock</button></form><Table headings={["Item", "Initial stock", "Available"]} rows={items.map((row) => [row.name ?? "Item", valueOf(row, "initial_quantity"), valueOf(row, "available_quantity")])} /></Panel></div></>}{selected && !program?.nfi_enabled && <div className="col-12"><Panel title="NFI setup"><p className="form-text">NFI is disabled for this program; no warehouse or item setup is shown.</p></Panel></div>}{error && <div className="col-12"><Message status={status} error={error} /></div>}</div>;
 }
 
 function Intake({ beneficiary, role }: { beneficiary: boolean; role: Role }) {

@@ -128,7 +128,7 @@ def verified_program_summary(program):
         "eligibility": list(enrollments.values("eligibility_status").order_by("eligibility_status")),
         "approvals": enrollments.filter(status=Enrollment.Status.APPROVED).count(),
         "payments": list(payments.values("status").order_by("status")),
-        "amounts": {"approved": str(program.transfer_amount * enrollments.filter(status=Enrollment.Status.APPROVED).count()), "distributed": str(sum((payment.amount for payment in payments.filter(status=PaymentInstruction.Status.SUCCESS)), Decimal("0")))},
+        "amounts": {"approved": str((program.transfer_amount or Decimal("0")) * enrollments.filter(status=Enrollment.Status.APPROVED).count()), "distributed": str(sum((payment.amount for payment in payments.filter(status=PaymentInstruction.Status.SUCCESS)), Decimal("0")))},
         "failures": payments.filter(status=PaymentInstruction.Status.FAILED).count(),
         "complaints": Complaint.objects.filter(beneficiary__household__program=program).count(),
         "verified_at": timezone.now(),

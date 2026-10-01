@@ -830,7 +830,7 @@ def reports_view(request):
     budgets = Budget.objects.filter(program__in=programs)
     distributed = payments.filter(status=PaymentInstruction.Status.SUCCESS).aggregate(total=Sum("amount"))["total"] or 0
     approved = enrollments.filter(status=Enrollment.Status.APPROVED).count()
-    approved_amount = sum((program.transfer_amount * program.enrollments.filter(status=Enrollment.Status.APPROVED).count() for program in programs), 0)
+    approved_amount = sum(((program.transfer_amount or Decimal("0")) * program.enrollments.filter(status=Enrollment.Status.APPROVED).count() for program in programs), Decimal("0"))
     budget_totals = budgets.aggregate(planned=Sum("planned_total"), actual=Sum("actual_total"))
     dashboards = {
         "beneficiaries": beneficiaries.count(),
@@ -901,7 +901,7 @@ def program_summary_view(request, program_id):
         "eligibility": list(enrollments.values("eligibility_status").annotate(count=Count("id")).order_by("eligibility_status")),
         "approvals": enrollments.filter(status=Enrollment.Status.APPROVED).count(),
         "payments": list(payments.values("status").annotate(count=Count("id"), amount=Sum("amount")).order_by("status")),
-        "amounts": {"approved": str(program.transfer_amount * enrollments.filter(status=Enrollment.Status.APPROVED).count()), "distributed": str(payments.filter(status=PaymentInstruction.Status.SUCCESS).aggregate(total=Sum("amount"))["total"] or 0)},
+        "amounts": {"approved": str((program.transfer_amount or Decimal("0")) * enrollments.filter(status=Enrollment.Status.APPROVED).count()), "distributed": str(payments.filter(status=PaymentInstruction.Status.SUCCESS).aggregate(total=Sum("amount"))["total"] or 0)},
         "failures": payments.filter(status=PaymentInstruction.Status.FAILED).count(),
         "reconciliation": list(reconciliation.values("issue_type", "status").annotate(count=Count("id")).order_by("issue_type")),
         "pdm": {"summary_source": "derived_api"},
