@@ -291,6 +291,50 @@ class ProgramAccessTests(TestCase):
         )
         self.assertEqual(channel_response.status_code, 201)
 
+    def test_payment_channels_require_cash_enabled_program(self):
+        nfi_only = Program.objects.create(
+            tenant=self.tenant,
+            name="NFI only",
+            country="Sudan",
+            currency="USD",
+            cash_enabled=False,
+            nfi_enabled=True,
+            created_by=self.manager,
+        )
+        combined = Program.objects.create(
+            tenant=self.tenant,
+            name="Cash and NFI",
+            country="Sudan",
+            currency="USD",
+            transfer_amount="25.00",
+            payment_cycle=Program.Cycle.ONE_TIME,
+            cash_enabled=True,
+            nfi_enabled=True,
+            created_by=self.manager,
+        )
+        self.client.force_authenticate(self.finance)
+        rejected = self.client.post(
+            f"/api/programs/{nfi_only.id}/channels/",
+            {"channel_type": "CASH", "provider_name": "Simulator", "currency": "USD", "is_active": True},
+            format="json",
+        )
+        self.assertEqual(rejected.status_code, 400)
+        accepted = self.client.post(
+            f"/api/programs/{combined.id}/channels/",
+            {"channel_type": "CASH", "provider_name": "Simulator", "currency": "USD", "is_active": True},
+            format="json",
+            HTTP_IDEMPOTENCY_KEY="combined-channel-1",
+        )
+        replay = self.client.post(
+            f"/api/programs/{combined.id}/channels/",
+            {"channel_type": "CASH", "provider_name": "Simulator", "currency": "USD", "is_active": True},
+            format="json",
+            HTTP_IDEMPOTENCY_KEY="combined-channel-1",
+        )
+        self.assertEqual(accepted.status_code, 201, accepted.data)
+        self.assertEqual(replay.status_code, 201, replay.data)
+        self.assertEqual(PaymentChannelConfig.objects.filter(program=combined).count(), 1)
+
     def test_reviewer_cannot_create_enrollment_for_another_tenant(self):
         other_tenant = Tenant.objects.create(name="Tenant B", tenant_type="NGO", default_currency="USD")
         other_manager = User.objects.create_user("other-manager@example.test", "Other Manager", other_tenant, "password", role=User.Role.MANAGER)
@@ -1082,6 +1126,7 @@ class NFIWorkflowTests(TestCase):
         self.manager = User.objects.create_user("nfi-manager@example.test", "NFI Manager", self.tenant, "password", role=User.Role.MANAGER)
         self.finance = User.objects.create_user("nfi-finance@example.test", "NFI Finance", self.tenant, "password", role=User.Role.FINANCE)
         self.reviewer = User.objects.create_user("nfi-reviewer@example.test", "NFI Reviewer", self.tenant, "password", role=User.Role.REVIEWER)
+        self.field_officer = User.objects.create_user("nfi-field@example.test", "NFI Field Officer", self.tenant, "password", role=User.Role.FIELD_OFFICER)
         self.program = Program.objects.create(name="NFI response", tenant=self.tenant, country="Sudan", currency="USD", transfer_amount="1.00", payment_cycle=Program.Cycle.ONE_TIME, cash_enabled=False, nfi_enabled=True, created_by=self.manager)
         self.household = Household.objects.create(tenant=self.tenant, program=self.program, household_size=3, location="Khartoum", registration_date=date.today(), created_by=self.manager)
         self.beneficiary = Beneficiary.objects.create(household=self.household, number="NFI-001", full_name="NFI Beneficiary", created_by=self.manager)
@@ -1135,3 +1180,10 @@ class NFIWorkflowTests(TestCase):
         self.client.force_authenticate(self.finance)
         response = self.client.post("/api/payment-instructions/", {"enrollment": str(self.enrollment.id), "beneficiary": str(self.beneficiary.id), "channel_config": str(channel.id), "amount": "10.00", "currency": "USD"}, format="json")
         self.assertEqual(response.status_code, 400)
+
+    def test_reviewer_and_field_officer_cannot_create_nfi_entitlements(self):
+        payload = {"beneficiary": str(self.beneficiary.id), "program": str(self.program.id), "warehouse": str(self.warehouse.id), "item": str(self.item.id), "quantity": 1}
+        for user in (self.reviewer, self.field_officer):
+            self.client.force_authenticate(user)
+            response = self.client.post("/api/nfi-entitlements/", payload, format="json")
+            self.assertEqual(response.status_code, 403, response.data)
