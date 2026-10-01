@@ -1,8 +1,10 @@
 from django.contrib.auth import authenticate
 from django.utils import timezone
 from django.utils.crypto import salted_hmac
+from django.db.models import Sum
 from rest_framework import serializers
 import re
+from decimal import Decimal
 
 from .models import (
     AISignal,
@@ -13,7 +15,6 @@ from .models import (
     Beneficiary,
     Budget,
     Complaint,
-    ComplaintAIAnalysis,
     ComplaintAIAnalysis,
     Enrollment,
     Household,
@@ -27,6 +28,8 @@ from .models import (
     ReviewTask,
     Tenant,
     User,
+    HouseholdEligibility, HouseholdEnrollment, CashEntitlement, Warehouse, NFIItem,
+    NFIEntitlement, StockMovement, DistributionEvent, DistributionAllocation, DistributionIssue,
 )
 
 
@@ -108,6 +111,211 @@ class ProgramSerializer(serializers.ModelSerializer):
         model = Program
         fields = "__all__"
         read_only_fields = ["tenant", "created_by", "created_at"]
+        extra_kwargs = {
+            "transfer_amount": {"required": False, "allow_null": True},
+            "payment_cycle": {"required": False, "allow_blank": True},
+        }
+
+    def validate(self, attrs):
+        cash_enabled = attrs.get("cash_enabled", self.instance.cash_enabled if self.instance else True)
+        transfer_amount = attrs.get("transfer_amount", self.instance.transfer_amount if self.instance else None)
+        payment_cycle = attrs.get("payment_cycle", self.instance.payment_cycle if self.instance else "")
+        if cash_enabled:
+            if transfer_amount is None:
+                raise serializers.ValidationError({"transfer_amount": "Transfer amount is required when Payment/Cash is enabled."})
+            if transfer_amount < Decimal("0.01"):
+                raise serializers.ValidationError({"transfer_amount": "Transfer amount must be at least 0.01 when Payment/Cash is enabled."})
+            if not payment_cycle:
+                raise serializers.ValidationError({"payment_cycle": "Payment cycle is required when Payment/Cash is enabled."})
+        else:
+            # Cash fields are deliberately cleared when Cash is disabled, so an
+            # NFI-only program cannot carry a misleading transfer configuration.
+            attrs["transfer_amount"] = None
+            attrs["payment_cycle"] = ""
+        return attrs
+
+
+class HouseholdEligibilitySerializer(serializers.ModelSerializer):
+    beneficiaries = serializers.SerializerMethodField()
+    class Meta:
+        model = HouseholdEligibility
+        fields = "__all__"
+        read_only_fields = ["decided_by", "decided_at", "created_at"]
+    def get_beneficiaries(self, obj):
+        return list(obj.household.beneficiaries.values("id", "full_name", "number", "status"))
+
+    def validate(self, attrs):
+        household = attrs.get("household") or self.instance.household
+        program = attrs.get("program") or self.instance.program
+        user = self.context["request"].user
+        if household.program_id != program.id:
+            raise serializers.ValidationError({"program": "Program must match the household program"})
+        if not user.is_superuser and program.tenant_id != user.tenant_id:
+            raise serializers.ValidationError("Program belongs to another tenant")
+        return attrs
+
+
+class HouseholdEnrollmentSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = HouseholdEnrollment
+        fields = "__all__"
+        read_only_fields = ["decided_by", "decided_at", "created_at"]
+
+    def validate(self, attrs):
+        household = attrs.get("household") or self.instance.household
+        program = attrs.get("program") or self.instance.program
+        user = self.context["request"].user
+        if household.program_id != program.id:
+            raise serializers.ValidationError({"program": "Program must match the household program"})
+        if not user.is_superuser and program.tenant_id != user.tenant_id:
+            raise serializers.ValidationError("Program belongs to another tenant")
+        return attrs
+
+
+class CashEntitlementSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = CashEntitlement
+        fields = "__all__"
+        read_only_fields = ["created_by", "created_at", "updated_at"]
+
+    def validate(self, attrs):
+        beneficiary = attrs.get("beneficiary") or self.instance.beneficiary
+        program = attrs.get("program") or self.instance.program
+        user = self.context["request"].user
+        if beneficiary.household.program_id != program.id:
+            raise serializers.ValidationError({"program": "Program must match the beneficiary household program"})
+        if not user.is_superuser and program.tenant_id != user.tenant_id:
+            raise serializers.ValidationError("Program belongs to another tenant")
+        if not program.cash_enabled:
+            raise serializers.ValidationError({"program": "Cash assistance is disabled for this program"})
+        if not Enrollment.objects.filter(beneficiary=beneficiary, program=program, status=Enrollment.Status.APPROVED, assistance_modality__in=[Enrollment.AssistanceModality.CASH, Enrollment.AssistanceModality.CASH_NFI]).exists():
+            raise serializers.ValidationError({"beneficiary": "Beneficiary is not approved for cash assistance"})
+        return attrs
+
+
+class WarehouseSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Warehouse
+        fields = "__all__"
+        read_only_fields = ["created_by", "created_at"]
+
+
+class NFIItemSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = NFIItem
+        fields = "__all__"
+        read_only_fields = ["created_by", "created_at"]
+
+
+class NFIEntitlementSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = NFIEntitlement
+        fields = "__all__"
+        read_only_fields = ["created_by", "created_at", "updated_at"]
+
+    def validate(self, attrs):
+        beneficiary = attrs.get("beneficiary") or self.instance.beneficiary
+        program = attrs.get("program") or self.instance.program
+        item = attrs.get("item") or self.instance.item
+        warehouse = attrs.get("warehouse", self.instance.warehouse if self.instance else None)
+        user = self.context["request"].user
+        if beneficiary.household.program_id != program.id:
+            raise serializers.ValidationError({"program": "Program must match the beneficiary household program"})
+        if not warehouse:
+            raise serializers.ValidationError({"warehouse": "Warehouse is required for NFI entitlement"})
+        if item.program_id != program.id or warehouse.program_id != program.id or item.warehouse_id != warehouse.id:
+            raise serializers.ValidationError("Item and warehouse must belong to the selected program")
+        if not program.nfi_enabled:
+            raise serializers.ValidationError({"program": "NFI assistance is disabled for this program"})
+        if attrs.get("quantity", self.instance.quantity if self.instance else 0) < 1:
+            raise serializers.ValidationError({"quantity": "NFI entitlement quantity must be greater than zero"})
+        if not item.active or item.available_quantity < 1:
+            raise serializers.ValidationError({"item": "Item is inactive or has no available stock"})
+        if not Enrollment.objects.filter(beneficiary=beneficiary, program=program, status=Enrollment.Status.APPROVED, assistance_modality__in=[Enrollment.AssistanceModality.NFI, Enrollment.AssistanceModality.CASH_NFI]).exists():
+            raise serializers.ValidationError({"beneficiary": "Beneficiary is not approved for NFI assistance"})
+        if not user.is_superuser and program.tenant_id != user.tenant_id:
+            raise serializers.ValidationError("Program belongs to another tenant")
+        return attrs
+
+
+class StockMovementSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = StockMovement
+        fields = "__all__"
+        read_only_fields = ["created_by", "created_at"]
+
+
+class DistributionEventSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = DistributionEvent
+        fields = "__all__"
+        read_only_fields = ["created_by", "created_at"]
+
+    def validate(self, attrs):
+        program = attrs.get("program") or self.instance.program
+        warehouse = attrs.get("warehouse", self.instance.warehouse if self.instance else None)
+        if not program.nfi_enabled:
+            raise serializers.ValidationError({"program": "NFI assistance is disabled for this program"})
+        if not warehouse or warehouse.program_id != program.id:
+            raise serializers.ValidationError({"warehouse": "Warehouse must belong to the selected NFI program"})
+        user = self.context["request"].user
+        if not user.is_superuser and program.tenant_id != user.tenant_id:
+            raise serializers.ValidationError("Program belongs to another tenant")
+        return attrs
+
+
+class DistributionAllocationSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = DistributionAllocation
+        fields = "__all__"
+        read_only_fields = ["created_by", "created_at"]
+
+    def validate(self, attrs):
+        entitlement = attrs.get("entitlement") or self.instance.entitlement
+        event = attrs.get("event") or self.instance.event
+        item = attrs.get("item") or self.instance.item
+        beneficiary = attrs.get("beneficiary") or self.instance.beneficiary
+        planned = attrs.get("planned_quantity", self.instance.planned_quantity if self.instance else 0)
+        allocated = attrs.get("allocated_quantity", self.instance.allocated_quantity if self.instance else 0)
+        if entitlement.beneficiary_id != beneficiary.id or entitlement.item_id != item.id:
+            raise serializers.ValidationError("Beneficiary and item must match the NFI entitlement")
+        if event.program_id != entitlement.program_id or event.warehouse_id != entitlement.warehouse_id:
+            raise serializers.ValidationError("Distribution event must match the entitlement program and warehouse")
+        already_allocated = DistributionAllocation.objects.filter(entitlement=entitlement).exclude(pk=getattr(self.instance, "pk", None)).aggregate(total=Sum("allocated_quantity"))["total"] or 0
+        if planned != allocated or allocated < 1 or already_allocated + allocated > entitlement.quantity:
+            raise serializers.ValidationError("Allocation must use the exact remaining entitlement quantity")
+        return attrs
+
+
+class DistributionIssueSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = DistributionIssue
+        fields = "__all__"
+        read_only_fields = ["created_by", "created_at"]
+
+    def validate(self, attrs):
+        entitlement = attrs.get("entitlement") or self.instance.entitlement
+        event = attrs.get("event") or self.instance.event
+        beneficiary = attrs.get("beneficiary") or self.instance.beneficiary
+        item = attrs.get("item") or self.instance.item
+        planned = attrs.get("planned_quantity", self.instance.planned_quantity if self.instance else None)
+        actual = attrs.get("actual_quantity", self.instance.actual_quantity if self.instance else 0)
+        if entitlement.beneficiary_id != beneficiary.id or entitlement.item_id != item.id:
+            raise serializers.ValidationError("Beneficiary and item must match the entitlement")
+        if event.program_id != entitlement.program_id or (event.warehouse_id and event.warehouse_id != entitlement.warehouse_id):
+            raise serializers.ValidationError("Distribution event must match the entitlement program and warehouse")
+        if not event.warehouse_id:
+            raise serializers.ValidationError({"event": "Distribution event must have a warehouse"})
+        allocation = DistributionAllocation.objects.filter(entitlement=entitlement, event=event, beneficiary=beneficiary, item=item).first()
+        if not allocation:
+            raise serializers.ValidationError("Delivery review requires an allocation from this distribution event")
+        already_delivered = DistributionIssue.objects.filter(entitlement=entitlement, event=event).exclude(pk=getattr(self.instance, "pk", None)).aggregate(total=Sum("actual_quantity"))["total"] or 0
+        if planned != allocation.allocated_quantity or planned < 1 or actual > planned or already_delivered + actual > allocation.allocated_quantity:
+            raise serializers.ValidationError("Actual delivery cannot exceed the planned entitlement quantity")
+        user = self.context["request"].user
+        if not user.is_superuser and event.program.tenant_id != user.tenant_id:
+            raise serializers.ValidationError("Distribution event belongs to another tenant")
+        return attrs
 
 
 class ProgramActivitySerializer(serializers.ModelSerializer):
@@ -258,6 +466,11 @@ class EnrollmentSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError("Beneficiary and program must belong to the same tenant")
         if not user.is_superuser and program.tenant_id != user.tenant_id:
             raise serializers.ValidationError("Program belongs to another tenant")
+        modality = attrs.get("assistance_modality", getattr(self.instance, "assistance_modality", Enrollment.AssistanceModality.CASH))
+        if modality in {Enrollment.AssistanceModality.CASH, Enrollment.AssistanceModality.CASH_NFI} and not program.cash_enabled:
+            raise serializers.ValidationError({"assistance_modality": "Payment is disabled for this program"})
+        if modality in {Enrollment.AssistanceModality.NFI, Enrollment.AssistanceModality.CASH_NFI} and not program.nfi_enabled:
+            raise serializers.ValidationError({"assistance_modality": "NFI is disabled for this program"})
         return attrs
 
     def update(self, instance, validated_data):
@@ -302,6 +515,10 @@ class PaymentInstructionSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError("Channel must belong to the enrollment program")
         if batch and (batch.tenant_id != enrollment.program.tenant_id or batch.program_id != enrollment.program_id):
             raise serializers.ValidationError({"batch": "Payment batch must belong to the enrollment program"})
+        if not enrollment.program.cash_enabled:
+            raise serializers.ValidationError({"enrollment": "Cash assistance is disabled for this program"})
+        if enrollment.assistance_modality not in {Enrollment.AssistanceModality.CASH, Enrollment.AssistanceModality.CASH_NFI}:
+            raise serializers.ValidationError({"enrollment": "Beneficiary is not approved for cash assistance"})
         if not self.context["request"].user.is_superuser and enrollment.program.tenant_id != self.context["request"].user.tenant_id:
             raise serializers.ValidationError("Enrollment belongs to another tenant")
         if not enrollment.program.workflow_config.get("payment_enabled", True):

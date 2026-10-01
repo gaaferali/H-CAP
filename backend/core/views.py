@@ -48,6 +48,8 @@ from .models import (
     ReviewTask,
     Tenant,
     User,
+    HouseholdEligibility, HouseholdEnrollment, CashEntitlement, Warehouse, NFIItem,
+    NFIEntitlement, StockMovement, DistributionEvent, DistributionAllocation, DistributionIssue,
 )
 from .serializers import (
     AuditEventSerializer,
@@ -76,6 +78,9 @@ from .serializers import (
     national_id_reference,
     normalize_national_id,
     normalize_phone_number,
+    HouseholdEligibilitySerializer, HouseholdEnrollmentSerializer, CashEntitlementSerializer,
+    WarehouseSerializer, NFIItemSerializer, NFIEntitlementSerializer, StockMovementSerializer,
+    DistributionEventSerializer, DistributionAllocationSerializer, DistributionIssueSerializer,
 )
 
 
@@ -355,6 +360,19 @@ class ProgramViewSet(RoleProtectedTenantViewSet):
         PaymentEvent.objects.filter(instruction_id__in=instruction_ids).delete()
         ReconciliationItem.objects.filter(Q(program=program) | Q(instruction_id__in=instruction_ids)).delete()
         PaymentInstruction.objects.filter(id__in=instruction_ids).delete()
+        # Remove additive assistance records before their protected beneficiaries,
+        # items, warehouses, and program can be removed.
+        program_issue_ids = list(DistributionIssue.objects.filter(entitlement__program=program).values_list("id", flat=True))
+        DistributionIssue.objects.filter(id__in=program_issue_ids).delete()
+        DistributionAllocation.objects.filter(entitlement__program=program).delete()
+        NFIEntitlement.objects.filter(program=program).delete()
+        DistributionEvent.objects.filter(program=program).delete()
+        StockMovement.objects.filter(program=program).delete()
+        NFIItem.objects.filter(program=program).delete()
+        Warehouse.objects.filter(program=program).delete()
+        CashEntitlement.objects.filter(program=program).delete()
+        HouseholdEnrollment.objects.filter(program=program).delete()
+        HouseholdEligibility.objects.filter(program=program).delete()
         Enrollment.objects.filter(id__in=enrollment_ids).delete()
         Beneficiary.objects.filter(id__in=beneficiary_ids).delete()
         Household.objects.filter(id__in=household_ids).delete()
@@ -389,6 +407,8 @@ class ProgramViewSet(RoleProtectedTenantViewSet):
     @action(detail=True, methods=["get", "post"], url_path="channels")
     def channels(self, request, pk=None):
         program = self.get_object()
+        if not program.cash_enabled:
+            raise ValidationError("Cash assistance is disabled for this program")
         if request.method == "GET":
             return Response(PaymentChannelConfigSerializer(program.channels.all(), many=True).data)
         serializer = PaymentChannelConfigSerializer(data={**request.data, "program": str(program.id)})
@@ -486,6 +506,9 @@ class PaymentInstructionViewSet(RoleProtectedTenantViewSet):
     tenant_field = "enrollment__program__tenant"
     allowed_roles = {User.Role.ADMIN, User.Role.FINANCE, User.Role.MANAGER, User.Role.AUDITOR}
     write_roles = {User.Role.ADMIN, User.Role.FINANCE, User.Role.MANAGER}
+
+    def get_queryset(self):
+        return super().get_queryset().filter(enrollment__program__cash_enabled=True)
 
     def update(self, request, *args, **kwargs):
         raise PermissionDenied("Payment instructions are immutable; use the controlled simulator actions")
@@ -642,12 +665,15 @@ class PaymentBatchViewSet(RoleProtectedTenantViewSet):
     allowed_roles = {User.Role.ADMIN, User.Role.FINANCE, User.Role.MANAGER, User.Role.AUDITOR}
     write_roles = {User.Role.ADMIN, User.Role.FINANCE, User.Role.MANAGER}
 
+    def get_queryset(self):
+        return super().get_queryset().filter(program__cash_enabled=True)
+
     def perform_create(self, serializer):
         program = serializer.validated_data["program"]
         if not self.request.user.is_superuser and program.tenant_id != self.request.user.tenant_id:
             raise ValidationError({"program": "Program belongs to another tenant"})
-        if not program.workflow_config.get("payment_enabled", True):
-            raise ValidationError({"program": "Payments are disabled for this program"})
+        if not program.cash_enabled:
+            raise ValidationError({"program": "Cash assistance is disabled for this program"})
         batch = serializer.save(tenant=program.tenant, created_by=self.request.user, idempotency_key=str(uuid.uuid4()))
         audit(self.request.user, "PAYMENT_BATCH_CREATED", batch, after=PaymentBatchSerializer(batch).data, tenant=program.tenant)
 
@@ -797,6 +823,10 @@ def reports_view(request):
     enrollments = Enrollment.objects.filter(program__in=programs)
     complaints = Complaint.objects.filter(beneficiary__household__program__in=programs)
     beneficiaries = Beneficiary.objects.filter(household__program__in=programs)
+    household_eligibility = HouseholdEligibility.objects.filter(program__in=programs)
+    household_enrollment = HouseholdEnrollment.objects.filter(program__in=programs)
+    nfi_entitlements = NFIEntitlement.objects.filter(program__in=programs)
+    nfi_issues = DistributionIssue.objects.filter(entitlement__in=nfi_entitlements)
     budgets = Budget.objects.filter(program__in=programs)
     distributed = payments.filter(status=PaymentInstruction.Status.SUCCESS).aggregate(total=Sum("amount"))["total"] or 0
     approved = enrollments.filter(status=Enrollment.Status.APPROVED).count()
@@ -818,6 +848,14 @@ def reports_view(request):
         "complaints": list(complaints.values("status").annotate(count=Count("id")).order_by("status")),
         "assigned_complaints": list(complaints.filter(assigned_to=request.user).values("id", "category", "severity", "status", "resolution_notes", "beneficiary__full_name", "beneficiary__household__program__name").order_by("status", "-created_at")),
         "operational_exceptions": payments.filter(Q(status=PaymentInstruction.Status.FAILED) | Q(complaints__isnull=False)).distinct().count(),
+        "eligible_households": household_eligibility.filter(status=HouseholdEligibility.Status.ELIGIBLE).values("household_id").distinct().count(),
+        "enrolled_households": household_enrollment.filter(status=HouseholdEnrollment.Status.ACCEPTED).values("household_id").distinct().count(),
+        "payment_beneficiaries": enrollments.filter(status=Enrollment.Status.APPROVED, assistance_modality__in=[Enrollment.AssistanceModality.CASH, Enrollment.AssistanceModality.CASH_NFI]).values("beneficiary_id").distinct().count(),
+        "nfi_beneficiaries": enrollments.filter(status=Enrollment.Status.APPROVED, assistance_modality__in=[Enrollment.AssistanceModality.NFI, Enrollment.AssistanceModality.CASH_NFI]).values("beneficiary_id").distinct().count(),
+        "nfi_entitlement_quantity": nfi_entitlements.aggregate(total=Sum("quantity"))["total"] or 0,
+        "nfi_distributed_quantity": nfi_issues.aggregate(total=Sum("actual_quantity"))["total"] or 0,
+        "nfi_pending_delivery": nfi_entitlements.filter(issues__isnull=True).count(),
+        "available_nfi_stock": NFIItem.objects.filter(program__in=programs).aggregate(total=Sum("available_quantity"))["total"] or 0,
         "program_kpis": list(programs.values("id", "name", "country", "currency", "status", "tenant__name").annotate(enrollments=Count("enrollments"))),
     }
     role_dashboard_fields = {
@@ -1100,6 +1138,18 @@ def pdm_summary_view(request):
     recorded_recipients = totals["received_count"] or 0
     channels = list(responses.exclude(channel="").values_list("channel", flat=True).distinct().order_by("channel"))
     locations = list(responses.exclude(location="").values_list("location", flat=True).distinct().order_by("location"))
+    eligible_households = HouseholdEligibility.objects.filter(program__in=summary_programs, status=HouseholdEligibility.Status.ELIGIBLE).values("household_id").distinct().count()
+    enrolled_households = HouseholdEnrollment.objects.filter(program__in=summary_programs, status=HouseholdEnrollment.Status.ACCEPTED).values("household_id").distinct().count()
+    approved = Enrollment.objects.filter(program__in=summary_programs, status=Enrollment.Status.APPROVED)
+    cash_beneficiaries = approved.filter(assistance_modality__in=[Enrollment.AssistanceModality.CASH, Enrollment.AssistanceModality.CASH_NFI]).values("beneficiary_id").distinct().count()
+    nfi_beneficiaries = approved.filter(assistance_modality__in=[Enrollment.AssistanceModality.NFI, Enrollment.AssistanceModality.CASH_NFI]).values("beneficiary_id").distinct().count()
+    cash_nfi_beneficiaries = approved.filter(assistance_modality=Enrollment.AssistanceModality.CASH_NFI).values("beneficiary_id").distinct().count()
+    nfi_entitlements = NFIEntitlement.objects.filter(program__in=summary_programs)
+    nfi_issues = DistributionIssue.objects.filter(entitlement__in=nfi_entitlements)
+    nfi_stock = NFIItem.objects.filter(program__in=summary_programs).aggregate(total=Sum("available_quantity"))["total"] or 0
+    nfi_allocated = StockMovement.objects.filter(program__in=summary_programs, movement_type=StockMovement.MovementType.ALLOCATION).aggregate(total=Sum("quantity"))["total"] or 0
+    warehouse_stock = list(NFIItem.objects.filter(program__in=summary_programs).values("warehouse_id", "warehouse__name", "warehouse__location").annotate(initial_quantity=Sum("initial_quantity"), available_quantity=Sum("available_quantity")).order_by("warehouse__name"))
+    delivery_exceptions = nfi_issues.exclude(delivery_status=DistributionIssue.DeliveryStatus.RECEIVED).count()
     return Response({
         "program": {"id": str(selected_program.id), "name": selected_program.name} if selected_program else None,
         "tenant": {"id": str(selected_tenant.id), "name": selected_tenant.name} if selected_tenant else None,
@@ -1116,6 +1166,24 @@ def pdm_summary_view(request):
         "complaint_rate": float(Decimal(complaints) * Decimal("100") / Decimal(paid_beneficiaries)) if paid_beneficiaries else 0,
         "satisfaction": float(totals["satisfaction"] / count) if count else 0,
         "responses": count,
+        "eligible_households": eligible_households,
+        "enrolled_households": enrolled_households,
+        "approved_beneficiaries": approved.count(),
+        "cash_beneficiaries": cash_beneficiaries,
+        "nfi_beneficiaries": nfi_beneficiaries,
+        "cash_nfi_beneficiaries": cash_nfi_beneficiaries,
+        "cash_entitlements": CashEntitlement.objects.filter(program__in=summary_programs).count(),
+        "nfi_entitlements": nfi_entitlements.count(),
+        "nfi_entitled_quantity": nfi_entitlements.aggregate(total=Sum("quantity"))["total"] or 0,
+        "nfi_allocated_quantity": nfi_allocated,
+        "nfi_distributed_quantity": nfi_issues.aggregate(total=Sum("actual_quantity"))["total"] or 0,
+        "nfi_pending_delivery": nfi_entitlements.filter(issues__isnull=True).count(),
+        "distribution_events": DistributionEvent.objects.filter(program__in=summary_programs).count(),
+        "available_nfi_stock": nfi_stock,
+        "nfi_enabled": summary_programs.filter(nfi_enabled=True).exists(),
+        "warehouse_stock": warehouse_stock,
+        "open_delivery_exceptions": delivery_exceptions,
+        "delivery_status_counts": {status: nfi_issues.filter(delivery_status=status).count() for status, _label in DistributionIssue.DeliveryStatus.choices},
     })
 
 
@@ -1396,3 +1464,249 @@ def pipeline_status_view(request):
     signal_scope = {} if request.user.is_superuser else {"tenant": request.user.tenant}
     beneficiary_scope = {} if request.user.is_superuser else {"household__tenant": request.user.tenant}
     return Response({"status": "completed", "pipeline": ["validation", "deduplication", "risk_signals", "human_review", "reconciliation", "verified_reporting"], "records": {"beneficiaries": Beneficiary.objects.filter(**beneficiary_scope).count(), "signals": AISignal.objects.filter(**signal_scope).count(), "review_tasks": ReviewTask.objects.filter(**signal_scope).count()}, "automation_execution": "controlled", "tenant_isolated": not request.user.is_superuser})
+
+
+class HouseholdEligibilityViewSet(RoleProtectedTenantViewSet):
+    queryset = HouseholdEligibility.objects.select_related("household", "program")
+    serializer_class = HouseholdEligibilitySerializer
+    allowed_roles = {User.Role.ADMIN, User.Role.REVIEWER, User.Role.MANAGER, User.Role.AUDITOR}
+    write_roles = {User.Role.ADMIN, User.Role.REVIEWER, User.Role.MANAGER}
+    tenant_field = "household__tenant"
+
+    def perform_create(self, serializer):
+        household = serializer.validated_data["household"]
+        instance = serializer.save(program=household.program, decided_by=self.request.user, decided_at=timezone.now())
+        audit(self.request.user, "HOUSEHOLD_ELIGIBILITY_DECISION", instance, after=serializer.data)
+
+
+class HouseholdEnrollmentViewSet(RoleProtectedTenantViewSet):
+    queryset = HouseholdEnrollment.objects.select_related("household", "program")
+    serializer_class = HouseholdEnrollmentSerializer
+    allowed_roles = {User.Role.ADMIN, User.Role.REVIEWER, User.Role.MANAGER, User.Role.AUDITOR}
+    write_roles = {User.Role.ADMIN, User.Role.REVIEWER, User.Role.MANAGER}
+    tenant_field = "household__tenant"
+
+    def perform_create(self, serializer):
+        household = serializer.validated_data["household"]
+        program = serializer.validated_data.get("program") or household.program
+        if not HouseholdEligibility.objects.filter(household=household, program=program, status=HouseholdEligibility.Status.ELIGIBLE).exists():
+            raise ValidationError("A household must be eligible before enrollment")
+        instance = serializer.save(program=program, decided_by=self.request.user, decided_at=timezone.now())
+        if instance.status == HouseholdEnrollment.Status.ACCEPTED:
+            Enrollment.objects.filter(beneficiary__household=household, program=program).update(status=Enrollment.Status.APPROVED, approved_by=self.request.user, approved_at=timezone.now())
+        audit(self.request.user, "HOUSEHOLD_ENROLLMENT_DECISION", instance, after=serializer.data)
+
+
+class CashEntitlementViewSet(RoleProtectedTenantViewSet):
+    queryset = CashEntitlement.objects.select_related("beneficiary", "program")
+    serializer_class = CashEntitlementSerializer
+    allowed_roles = {User.Role.ADMIN, User.Role.FINANCE, User.Role.MANAGER, User.Role.AUDITOR}
+    write_roles = {User.Role.ADMIN, User.Role.FINANCE, User.Role.MANAGER}
+    tenant_field = "program__tenant"
+
+    def get_queryset(self):
+        return super().get_queryset().filter(program__cash_enabled=True)
+
+    def perform_create(self, serializer):
+        beneficiary, program = serializer.validated_data["beneficiary"], serializer.validated_data["program"]
+        if not program.cash_enabled:
+            raise ValidationError("Cash assistance is disabled for this program")
+        if not Enrollment.objects.filter(beneficiary=beneficiary, program=program, status=Enrollment.Status.APPROVED).exists():
+            raise ValidationError("Beneficiary is not approved for assistance")
+        serializer.save(created_by=self.request.user)
+
+
+class WarehouseViewSet(RoleProtectedTenantViewSet):
+    queryset = Warehouse.objects.select_related("program")
+    serializer_class = WarehouseSerializer
+    allowed_roles = {User.Role.ADMIN, User.Role.MANAGER, User.Role.FIELD_OFFICER, User.Role.AUDITOR}
+    write_roles = {User.Role.ADMIN, User.Role.MANAGER}
+    tenant_field = "program__tenant"
+
+    def get_queryset(self):
+        return super().get_queryset().filter(program__nfi_enabled=True)
+
+    def perform_create(self, serializer):
+        program = serializer.validated_data["program"]
+        if not program.nfi_enabled:
+            raise ValidationError("NFI is disabled for this program")
+        serializer.save(created_by=self.request.user)
+
+
+class NFIItemViewSet(RoleProtectedTenantViewSet):
+    queryset = NFIItem.objects.select_related("program", "warehouse")
+    serializer_class = NFIItemSerializer
+    allowed_roles = {User.Role.ADMIN, User.Role.MANAGER, User.Role.FIELD_OFFICER, User.Role.FINANCE, User.Role.AUDITOR}
+    write_roles = {User.Role.ADMIN, User.Role.MANAGER}
+    tenant_field = "program__tenant"
+
+    def get_queryset(self):
+        return super().get_queryset().filter(program__nfi_enabled=True)
+
+    def perform_create(self, serializer):
+        data = serializer.validated_data
+        program, warehouse = data["program"], data["warehouse"]
+        if not program.nfi_enabled:
+            raise ValidationError("NFI is disabled for this program")
+        if warehouse.program_id != program.id:
+            raise ValidationError("Warehouse must belong to the selected program")
+        quantity = data.get("initial_quantity", data.get("available_quantity", 0))
+        instance = serializer.save(initial_quantity=quantity, available_quantity=quantity, created_by=self.request.user)
+        if quantity:
+            StockMovement.objects.create(program=program, warehouse=warehouse, item=instance, quantity=quantity, movement_type=StockMovement.MovementType.ENTRY, reference="initial stock", created_by=self.request.user)
+
+
+class NFIEntitlementViewSet(RoleProtectedTenantViewSet):
+    queryset = NFIEntitlement.objects.select_related("beneficiary", "program", "item")
+    serializer_class = NFIEntitlementSerializer
+    allowed_roles = {User.Role.ADMIN, User.Role.FINANCE, User.Role.MANAGER, User.Role.FIELD_OFFICER, User.Role.AUDITOR}
+    write_roles = {User.Role.ADMIN, User.Role.FINANCE, User.Role.MANAGER, User.Role.FIELD_OFFICER}
+    tenant_field = "program__tenant"
+
+    def get_queryset(self):
+        return super().get_queryset().filter(program__nfi_enabled=True)
+
+    def perform_create(self, serializer):
+        data = serializer.validated_data
+        beneficiary, program, item = data["beneficiary"], data["program"], data["item"]
+        if not program.nfi_enabled:
+            raise ValidationError("NFI assistance is disabled for this program")
+        warehouse = data.get("warehouse")
+        if not warehouse:
+            raise ValidationError("Warehouse is required for NFI entitlement")
+        if item.program_id != program.id or warehouse.program_id != program.id or item.warehouse_id != warehouse.id or not item.active:
+            raise ValidationError("Item is not active for this program")
+        if not Enrollment.objects.filter(beneficiary=beneficiary, program=program, status=Enrollment.Status.APPROVED, assistance_modality__in=[Enrollment.AssistanceModality.NFI, Enrollment.AssistanceModality.CASH_NFI]).exists():
+            raise ValidationError("Beneficiary is not approved for NFI assistance")
+        household = beneficiary.household
+        if household.eligibility_decisions.exists() and not household.eligibility_decisions.filter(program=program, status=HouseholdEligibility.Status.ELIGIBLE).exists():
+            raise ValidationError("Household is not eligible for NFI assistance")
+        if household.household_enrollments.exists() and not household.household_enrollments.filter(program=program, status=HouseholdEnrollment.Status.ACCEPTED).exists():
+            raise ValidationError("Household enrollment has not been accepted")
+        with transaction.atomic():
+            locked = NFIItem.objects.select_for_update().get(pk=item.pk)
+            if data["quantity"] > locked.available_quantity:
+                raise ValidationError("Insufficient stock")
+            locked.available_quantity -= data["quantity"]
+            locked.save(update_fields=["available_quantity"])
+            instance = serializer.save(created_by=self.request.user)
+            StockMovement.objects.create(program=program, warehouse=locked.warehouse, item=locked, quantity=data["quantity"], movement_type=StockMovement.MovementType.ALLOCATION, reference=str(instance.pk), created_by=self.request.user)
+            audit(self.request.user, "NFI_STOCK_ALLOCATED", instance, after={"warehouse": str(locked.warehouse_id), "item": str(locked.id), "quantity": data["quantity"]}, tenant=program.tenant)
+
+
+class StockMovementViewSet(RoleProtectedTenantViewSet):
+    queryset = StockMovement.objects.select_related("program", "warehouse", "item")
+    serializer_class = StockMovementSerializer
+    allowed_roles = {User.Role.ADMIN, User.Role.MANAGER, User.Role.FIELD_OFFICER, User.Role.FINANCE, User.Role.AUDITOR}
+    write_roles = {User.Role.ADMIN, User.Role.MANAGER}
+    tenant_field = "program__tenant"
+
+
+class DistributionEventViewSet(RoleProtectedTenantViewSet):
+    queryset = DistributionEvent.objects.select_related("program")
+    serializer_class = DistributionEventSerializer
+    allowed_roles = {User.Role.ADMIN, User.Role.MANAGER, User.Role.FIELD_OFFICER, User.Role.FINANCE, User.Role.AUDITOR}
+    write_roles = {User.Role.ADMIN, User.Role.MANAGER, User.Role.FIELD_OFFICER}
+    tenant_field = "program__tenant"
+
+    def get_queryset(self):
+        return super().get_queryset().filter(program__nfi_enabled=True)
+
+    @transaction.atomic
+    def create(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        entitlement_ids = request.data.get("entitlement_ids") or []
+        if not isinstance(entitlement_ids, list) or not entitlement_ids:
+            raise ValidationError({"entitlement_ids": "Select one or more existing NFI entitlements"})
+        program = serializer.validated_data["program"]
+        warehouse = serializer.validated_data["warehouse"]
+        entitlements = list(NFIEntitlement.objects.select_for_update().select_related("beneficiary__household", "item", "warehouse").filter(id__in=entitlement_ids, program=program, warehouse=warehouse, status=NFIEntitlement.Status.ACTIVE))
+        if len(entitlements) != len(set(str(item) for item in entitlement_ids)):
+            raise ValidationError({"entitlement_ids": "Each entitlement must be active and belong to the selected program and warehouse"})
+        for entitlement in entitlements:
+            if not entitlement.item.active or entitlement.item.warehouse_id != warehouse.id:
+                raise ValidationError("Entitlement item is not active in the selected warehouse")
+            if not Enrollment.objects.filter(beneficiary=entitlement.beneficiary, program=program, status=Enrollment.Status.APPROVED, assistance_modality__in=[Enrollment.AssistanceModality.NFI, Enrollment.AssistanceModality.CASH_NFI]).exists():
+                raise ValidationError("Every selected beneficiary must be approved for NFI assistance")
+            allocated = DistributionAllocation.objects.filter(entitlement=entitlement).aggregate(total=Sum("allocated_quantity"))["total"] or 0
+            if allocated >= entitlement.quantity:
+                raise ValidationError("An entitlement is already fully assigned to a distribution event")
+        event = serializer.save(created_by=request.user)
+        allocations = []
+        for entitlement in entitlements:
+            allocated = DistributionAllocation.objects.filter(entitlement=entitlement).aggregate(total=Sum("allocated_quantity"))["total"] or 0
+            remaining = entitlement.quantity - allocated
+            allocations.append(DistributionAllocation.objects.create(beneficiary=entitlement.beneficiary, entitlement=entitlement, event=event, item=entitlement.item, planned_quantity=remaining, allocated_quantity=remaining, status="ALLOCATED", created_by=request.user))
+        audit(request.user, "DISTRIBUTION_EVENT_CREATED", event, after={"entitlement_ids": [str(item.id) for item in entitlements], "allocation_ids": [str(item.id) for item in allocations]}, tenant=program.tenant)
+        headers = self.get_success_headers(serializer.data)
+        return Response(self.get_serializer(event).data, status=status.HTTP_201_CREATED, headers=headers)
+
+    def perform_create(self, serializer):
+        program = serializer.validated_data["program"]
+        warehouse = serializer.validated_data.get("warehouse")
+        if not program.nfi_enabled:
+            raise ValidationError("NFI assistance is disabled for this program")
+        if not warehouse:
+            raise ValidationError({"warehouse": "A warehouse is required for a distribution event"})
+        if warehouse.program_id != program.id:
+            raise ValidationError("Warehouse must belong to the selected program")
+        serializer.save(created_by=self.request.user)
+
+
+class DistributionAllocationViewSet(RoleProtectedTenantViewSet):
+    queryset = DistributionAllocation.objects.select_related("beneficiary", "entitlement", "event", "item")
+    serializer_class = DistributionAllocationSerializer
+    allowed_roles = {User.Role.ADMIN, User.Role.MANAGER, User.Role.FIELD_OFFICER, User.Role.FINANCE, User.Role.AUDITOR}
+    write_roles = {User.Role.ADMIN, User.Role.MANAGER, User.Role.FIELD_OFFICER}
+    tenant_field = "event__program__tenant"
+
+    def perform_create(self, serializer):
+        data = serializer.validated_data
+        entitlement, event, item, beneficiary = data["entitlement"], data["event"], data["item"], data["beneficiary"]
+        if entitlement.beneficiary_id != beneficiary.id or entitlement.item_id != item.id or event.program_id != entitlement.program_id:
+            raise ValidationError("Allocation must match the entitlement beneficiary, item, and program")
+        if not event.warehouse_id or entitlement.warehouse_id != event.warehouse_id or item.warehouse_id != event.warehouse_id:
+            raise ValidationError("Allocation warehouse must match the entitlement and event warehouse")
+        planned = data["planned_quantity"]
+        allocated = data.get("allocated_quantity", 0)
+        if planned > entitlement.quantity or allocated > planned:
+            raise ValidationError("Allocation cannot exceed the entitlement quantity")
+        serializer.save(created_by=self.request.user)
+
+
+class DistributionIssueViewSet(RoleProtectedTenantViewSet):
+    queryset = DistributionIssue.objects.select_related("beneficiary", "entitlement", "event", "item")
+    serializer_class = DistributionIssueSerializer
+    allowed_roles = {User.Role.ADMIN, User.Role.MANAGER, User.Role.REVIEWER, User.Role.FIELD_OFFICER, User.Role.FINANCE, User.Role.AUDITOR}
+    write_roles = {User.Role.ADMIN, User.Role.MANAGER, User.Role.REVIEWER}
+    tenant_field = "event__program__tenant"
+
+    def perform_create(self, serializer):
+        data = serializer.validated_data
+        entitlement, event = data["entitlement"], data["event"]
+        if event.program_id != entitlement.program_id or data["item"].id != entitlement.item_id:
+            raise ValidationError("Distribution issue relationships must belong to the same entitlement and program")
+        if data["actual_quantity"] > data["planned_quantity"] or data["actual_quantity"] > entitlement.quantity:
+            raise ValidationError("Delivered quantity cannot exceed planned entitlement quantity")
+        instance = serializer.save(created_by=self.request.user)
+        movement_type = StockMovement.MovementType.DISTRIBUTION if instance.actual_quantity else StockMovement.MovementType.ISSUE
+        if instance.actual_quantity:
+            StockMovement.objects.create(program=event.program, warehouse=event.warehouse, item=instance.item, quantity=instance.actual_quantity, movement_type=movement_type, reference=str(instance.pk), created_by=self.request.user)
+        if instance.actual_quantity >= instance.entitlement.quantity:
+            instance.entitlement.status = NFIEntitlement.Status.DISTRIBUTED
+            instance.entitlement.save(update_fields=["status", "updated_at"])
+        audit(self.request.user, "DISTRIBUTION_DELIVERY_RECORDED", instance, after=serializer.data)
+
+    @transaction.atomic
+    def perform_update(self, serializer):
+        before = DistributionIssueSerializer(serializer.instance).data
+        old_actual = serializer.instance.actual_quantity
+        instance = serializer.save()
+        delta = instance.actual_quantity - old_actual
+        if delta > 0:
+            StockMovement.objects.create(program=instance.event.program, warehouse=instance.event.warehouse, item=instance.item, quantity=delta, movement_type=StockMovement.MovementType.DISTRIBUTION, reference=str(instance.pk), created_by=self.request.user)
+        if instance.actual_quantity >= instance.entitlement.quantity and instance.entitlement.status != NFIEntitlement.Status.DISTRIBUTED:
+            instance.entitlement.status = NFIEntitlement.Status.DISTRIBUTED
+            instance.entitlement.save(update_fields=["status", "updated_at"])
+        audit(self.request.user, "DISTRIBUTION_DELIVERY_UPDATED", instance, before=before, after=DistributionIssueSerializer(instance).data)

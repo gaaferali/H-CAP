@@ -43,6 +43,9 @@ from .views import (
     complaint_ai_analysis_view,
     complaint_ai_review_view,
     complaint_ai_analyze_bulk_view,
+    HouseholdEligibilityViewSet, HouseholdEnrollmentViewSet, CashEntitlementViewSet,
+    WarehouseViewSet, NFIItemViewSet, NFIEntitlementViewSet, StockMovementViewSet,
+    DistributionEventViewSet, DistributionAllocationViewSet, DistributionIssueViewSet,
 )
 
 router = DefaultRouter()
@@ -64,6 +67,16 @@ router.register("review-tasks", ReviewTaskViewSet)
 router.register("ai-signals", AISignalViewSet, basename="ai-signal")
 router.register("automation-rules", AutomationRuleViewSet, basename="automation-rule")
 router.register("automation-executions", AutomationExecutionViewSet, basename="automation-execution")
+router.register("household-eligibility", HouseholdEligibilityViewSet, basename="household-eligibility")
+router.register("household-enrollments", HouseholdEnrollmentViewSet, basename="household-enrollment")
+router.register("cash-entitlements", CashEntitlementViewSet, basename="cash-entitlement")
+router.register("warehouses", WarehouseViewSet, basename="warehouse")
+router.register("nfi-items", NFIItemViewSet, basename="nfi-item")
+router.register("nfi-entitlements", NFIEntitlementViewSet, basename="nfi-entitlement")
+router.register("stock-movements", StockMovementViewSet, basename="stock-movement")
+router.register("distribution-events", DistributionEventViewSet, basename="distribution-event")
+router.register("distribution-allocations", DistributionAllocationViewSet, basename="distribution-allocation")
+router.register("distribution-issues", DistributionIssueViewSet, basename="distribution-issue")
 
 urlpatterns = [
     path("", include(router.urls)),

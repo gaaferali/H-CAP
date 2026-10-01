@@ -1,3 +1,6 @@
+:has(#cash_enabled:not(:checked)) .payment-only-field {
+  display: none;
+}
 :root {
   --institution-blue: #087eb5;
   --institution-blue-dark: #005b8f;

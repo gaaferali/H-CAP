@@ -87,8 +87,8 @@ class Program(models.Model):
     exchange_rate = models.DecimalField(max_digits=18, decimal_places=6, default=1)
     timezone = models.CharField(max_length=80, default="UTC")
     language = models.CharField(max_length=10, default="en")
-    transfer_amount = models.DecimalField(max_digits=18, decimal_places=2, validators=[MinValueValidator(0.01)])
-    payment_cycle = models.CharField(max_length=20, choices=Cycle.choices)
+    transfer_amount = models.DecimalField(max_digits=18, decimal_places=2, null=True, blank=True, validators=[MinValueValidator(0.01)])
+    payment_cycle = models.CharField(max_length=20, choices=Cycle.choices, blank=True)
     status = models.CharField(max_length=20, choices=Status.choices, default=Status.DRAFT)
     workflow_config = models.JSONField(default=dict, blank=True)
     country_pack = models.JSONField(default=dict, blank=True)
@@ -96,6 +96,9 @@ class Program(models.Model):
     end_date = models.DateField(null=True, blank=True)
     created_by = models.ForeignKey(User, on_delete=models.PROTECT, related_name="created_programs")
     created_at = models.DateTimeField(default=django_timezone.now)
+    cash_enabled = models.BooleanField(default=True)
+    nfi_enabled = models.BooleanField(default=False)
+    other_assistance_enabled = models.BooleanField(default=False)
 
 
 class Household(models.Model):
@@ -151,6 +154,10 @@ class Beneficiary(models.Model):
 
 
 class Enrollment(models.Model):
+    class AssistanceModality(models.TextChoices):
+        CASH = "CASH", "Payment"
+        NFI = "NFI", "NFI"
+        CASH_NFI = "CASH_NFI", "Payment + NFI"
     class EligibilityStatus(models.TextChoices):
         PENDING = "PENDING", "Pending"
         ELIGIBLE = "ELIGIBLE", "Eligible"
@@ -168,6 +175,7 @@ class Enrollment(models.Model):
     program = models.ForeignKey(Program, on_delete=models.PROTECT, related_name="enrollments")
     eligibility_status = models.CharField(max_length=20, choices=EligibilityStatus.choices, default=EligibilityStatus.PENDING)
     status = models.CharField(max_length=20, choices=Status.choices, default=Status.ENROLLED)
+    assistance_modality = models.CharField(max_length=12, choices=AssistanceModality.choices, default=AssistanceModality.CASH)
     enrolled_at = models.DateTimeField(default=django_timezone.now)
     approved_by = models.ForeignKey(User, on_delete=models.PROTECT, null=True, blank=True, related_name="approved_enrollments")
     approved_at = models.DateTimeField(null=True, blank=True)
@@ -546,4 +554,180 @@ class AutomationExecution(models.Model):
     event_payload = models.JSONField(default=dict, blank=True)
     planned_action = models.JSONField(default=dict, blank=True)
     status = models.CharField(max_length=20, choices=Status.choices, default=Status.BLOCKED)
+    created_at = models.DateTimeField(default=django_timezone.now)
+
+
+class HouseholdEligibility(models.Model):
+    class Status(models.TextChoices):
+        PENDING = "PENDING", "Pending"
+        ELIGIBLE = "ELIGIBLE", "Eligible"
+        INELIGIBLE = "INELIGIBLE", "Ineligible"
+        ON_HOLD = "ON_HOLD", "On hold"
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    household = models.ForeignKey(Household, on_delete=models.PROTECT, related_name="eligibility_decisions")
+    program = models.ForeignKey(Program, on_delete=models.PROTECT, related_name="household_eligibility")
+    status = models.CharField(max_length=20, choices=Status.choices, default=Status.PENDING)
+    note = models.TextField(blank=True)
+    decided_by = models.ForeignKey(User, on_delete=models.PROTECT, null=True, blank=True, related_name="household_eligibility_decisions")
+    decided_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(default=django_timezone.now)
+
+
+class HouseholdEnrollment(models.Model):
+    class Status(models.TextChoices):
+        PENDING = "PENDING", "Pending"
+        ACCEPTED = "ACCEPTED", "Accepted"
+        REJECTED = "REJECTED", "Rejected"
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    household = models.ForeignKey(Household, on_delete=models.PROTECT, related_name="household_enrollments")
+    program = models.ForeignKey(Program, on_delete=models.PROTECT, related_name="household_enrollments")
+    status = models.CharField(max_length=20, choices=Status.choices, default=Status.PENDING)
+    note = models.TextField(blank=True)
+    decided_by = models.ForeignKey(User, on_delete=models.PROTECT, null=True, blank=True, related_name="household_enrollment_decisions")
+    decided_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(default=django_timezone.now)
+
+
+class CashEntitlement(models.Model):
+    class Status(models.TextChoices):
+        ACTIVE = "ACTIVE", "Active"
+        PAID = "PAID", "Paid"
+        CANCELLED = "CANCELLED", "Cancelled"
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    beneficiary = models.ForeignKey(Beneficiary, on_delete=models.PROTECT, related_name="cash_entitlements")
+    program = models.ForeignKey(Program, on_delete=models.PROTECT, related_name="cash_entitlements")
+    amount = models.DecimalField(max_digits=18, decimal_places=2, validators=[MinValueValidator(0.01)])
+    currency = models.CharField(max_length=3)
+    conditions = models.TextField(blank=True)
+    valid_from = models.DateField(null=True, blank=True)
+    valid_until = models.DateField(null=True, blank=True)
+    status = models.CharField(max_length=20, choices=Status.choices, default=Status.ACTIVE)
+    created_by = models.ForeignKey(User, on_delete=models.PROTECT, related_name="created_cash_entitlements")
+    created_at = models.DateTimeField(default=django_timezone.now)
+    updated_at = models.DateTimeField(auto_now=True)
+
+
+class Warehouse(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    program = models.ForeignKey(Program, on_delete=models.PROTECT, related_name="warehouses")
+    name = models.CharField(max_length=255)
+    location = models.CharField(max_length=255)
+    person_in_charge = models.CharField(max_length=255, blank=True)
+    responsible_team = models.CharField(max_length=255, blank=True)
+    active = models.BooleanField(default=True)
+    created_by = models.ForeignKey(User, on_delete=models.PROTECT, related_name="created_warehouses")
+    created_at = models.DateTimeField(default=django_timezone.now)
+    updated_at = models.DateTimeField(auto_now=True)
+
+
+class NFIItem(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    program = models.ForeignKey(Program, on_delete=models.PROTECT, related_name="nfi_items")
+    warehouse = models.ForeignKey(Warehouse, on_delete=models.PROTECT, related_name="items")
+    name = models.CharField(max_length=255)
+    item_type = models.CharField(max_length=80, default="ITEM")
+    unit = models.CharField(max_length=80)
+    description = models.TextField(blank=True)
+    active = models.BooleanField(default=True)
+    initial_quantity = models.PositiveIntegerField(default=0)
+    available_quantity = models.PositiveIntegerField(default=0)
+    created_by = models.ForeignKey(User, on_delete=models.PROTECT, related_name="created_nfi_items")
+    created_at = models.DateTimeField(default=django_timezone.now)
+    updated_at = models.DateTimeField(auto_now=True)
+
+
+class NFIEntitlement(models.Model):
+    class Status(models.TextChoices):
+        ACTIVE = "ACTIVE", "Active"
+        DISTRIBUTED = "DISTRIBUTED", "Distributed"
+        CANCELLED = "CANCELLED", "Cancelled"
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    beneficiary = models.ForeignKey(Beneficiary, on_delete=models.PROTECT, related_name="nfi_entitlements")
+    program = models.ForeignKey(Program, on_delete=models.PROTECT, related_name="nfi_entitlements")
+    item = models.ForeignKey(NFIItem, on_delete=models.PROTECT, related_name="entitlements")
+    warehouse = models.ForeignKey(Warehouse, on_delete=models.PROTECT, related_name="nfi_entitlements", null=True, blank=True)
+    quantity = models.PositiveIntegerField(validators=[MinValueValidator(1)])
+    conditions = models.TextField(blank=True)
+    valid_from = models.DateField(null=True, blank=True)
+    valid_until = models.DateField(null=True, blank=True)
+    status = models.CharField(max_length=20, choices=Status.choices, default=Status.ACTIVE)
+    created_by = models.ForeignKey(User, on_delete=models.PROTECT, related_name="created_nfi_entitlements")
+    created_at = models.DateTimeField(default=django_timezone.now)
+    updated_at = models.DateTimeField(auto_now=True)
+
+
+class StockMovement(models.Model):
+    class MovementType(models.TextChoices):
+        ENTRY = "ENTRY", "Entry"
+        ALLOCATION = "ALLOCATION", "Allocation"
+        ISSUE = "ISSUE", "Issue"
+        DISTRIBUTION = "DISTRIBUTION", "Distribution"
+        RETURN = "RETURN", "Return"
+        DAMAGED = "DAMAGED", "Damaged"
+        LOST = "LOST", "Lost"
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    program = models.ForeignKey(Program, on_delete=models.PROTECT, related_name="stock_movements")
+    warehouse = models.ForeignKey(Warehouse, on_delete=models.PROTECT, related_name="stock_movements")
+    item = models.ForeignKey(NFIItem, on_delete=models.PROTECT, related_name="stock_movements")
+    quantity = models.PositiveIntegerField()
+    movement_type = models.CharField(max_length=20, choices=MovementType.choices)
+    reference = models.CharField(max_length=255, blank=True)
+    created_by = models.ForeignKey(User, on_delete=models.PROTECT, related_name="stock_movements")
+    created_at = models.DateTimeField(default=django_timezone.now)
+
+
+class DistributionEvent(models.Model):
+    class Status(models.TextChoices):
+        PLANNED = "PLANNED", "Planned"
+        OPEN = "OPEN", "Open"
+        CLOSED = "CLOSED", "Closed"
+        CANCELLED = "CANCELLED", "Cancelled"
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    program = models.ForeignKey(Program, on_delete=models.PROTECT, related_name="distribution_events")
+    warehouse = models.ForeignKey(Warehouse, on_delete=models.PROTECT, related_name="distribution_events", null=True, blank=True)
+    location = models.CharField(max_length=255)
+    event_date = models.DateField()
+    distribution_team = models.CharField(max_length=255)
+    status = models.CharField(max_length=20, choices=Status.choices, default=Status.PLANNED)
+    evidence = models.TextField(blank=True)
+    notes = models.TextField(blank=True)
+    exceptions = models.TextField(blank=True)
+    created_by = models.ForeignKey(User, on_delete=models.PROTECT, related_name="created_distribution_events")
+    created_at = models.DateTimeField(default=django_timezone.now)
+
+
+class DistributionAllocation(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    beneficiary = models.ForeignKey(Beneficiary, on_delete=models.PROTECT, related_name="distribution_allocations")
+    entitlement = models.ForeignKey(NFIEntitlement, on_delete=models.PROTECT, related_name="allocations")
+    event = models.ForeignKey(DistributionEvent, on_delete=models.PROTECT, related_name="allocations")
+    item = models.ForeignKey(NFIItem, on_delete=models.PROTECT, related_name="allocations")
+    planned_quantity = models.PositiveIntegerField()
+    allocated_quantity = models.PositiveIntegerField(default=0)
+    status = models.CharField(max_length=20, default="PLANNED")
+    created_by = models.ForeignKey(User, on_delete=models.PROTECT, related_name="distribution_allocations")
+    created_at = models.DateTimeField(default=django_timezone.now)
+
+
+class DistributionIssue(models.Model):
+    class DeliveryStatus(models.TextChoices):
+        RECEIVED = "RECEIVED", "Received"
+        PARTIALLY_RECEIVED = "PARTIALLY_RECEIVED", "Partially received"
+        NOT_RECEIVED = "NOT_RECEIVED", "Not received"
+        NO_SHOW = "NO_SHOW", "No show"
+        REJECTED = "REJECTED", "Rejected"
+        DAMAGED = "DAMAGED", "Damaged"
+        LOST = "LOST", "Lost"
+        RESCHEDULED = "RESCHEDULED", "Rescheduled"
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    beneficiary = models.ForeignKey(Beneficiary, on_delete=models.PROTECT, related_name="distribution_issues")
+    entitlement = models.ForeignKey(NFIEntitlement, on_delete=models.PROTECT, related_name="issues")
+    item = models.ForeignKey(NFIItem, on_delete=models.PROTECT, related_name="issues")
+    event = models.ForeignKey(DistributionEvent, on_delete=models.PROTECT, related_name="issues")
+    planned_quantity = models.PositiveIntegerField()
+    actual_quantity = models.PositiveIntegerField(default=0)
+    delivery_status = models.CharField(max_length=30, choices=DeliveryStatus.choices)
+    evidence = models.TextField(blank=True)
+    notes = models.TextField(blank=True)
+    created_by = models.ForeignKey(User, on_delete=models.PROTECT, related_name="distribution_issues")
     created_at = models.DateTimeField(default=django_timezone.now)

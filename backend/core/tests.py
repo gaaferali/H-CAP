@@ -20,6 +20,11 @@ from .models import (
     Program,
     ProgramActivity,
     ReviewTask,
+    Warehouse,
+    NFIItem,
+    NFIEntitlement,
+    DistributionAllocation,
+    DistributionIssue,
     Tenant,
     User,
 )
@@ -967,3 +972,47 @@ class DeletionAccessTests(TestCase):
 
         self.assertEqual(response.status_code, 404)
         self.assertTrue(Program.objects.filter(id=self.other_program.id).exists())
+
+
+class NFIWorkflowTests(TestCase):
+    def setUp(self):
+        self.tenant = Tenant.objects.create(name="NFI Tenant", tenant_type="NGO", default_currency="USD")
+        self.manager = User.objects.create_user("nfi-manager@example.test", "NFI Manager", self.tenant, "password", role=User.Role.MANAGER)
+        self.finance = User.objects.create_user("nfi-finance@example.test", "NFI Finance", self.tenant, "password", role=User.Role.FINANCE)
+        self.reviewer = User.objects.create_user("nfi-reviewer@example.test", "NFI Reviewer", self.tenant, "password", role=User.Role.REVIEWER)
+        self.program = Program.objects.create(name="NFI response", tenant=self.tenant, country="Sudan", currency="USD", transfer_amount="1.00", payment_cycle=Program.Cycle.ONE_TIME, cash_enabled=False, nfi_enabled=True, created_by=self.manager)
+        self.household = Household.objects.create(tenant=self.tenant, program=self.program, household_size=3, location="Khartoum", registration_date=date.today(), created_by=self.manager)
+        self.beneficiary = Beneficiary.objects.create(household=self.household, number="NFI-001", full_name="NFI Beneficiary", created_by=self.manager)
+        self.enrollment = Enrollment.objects.create(beneficiary=self.beneficiary, program=self.program, eligibility_status=Enrollment.EligibilityStatus.ELIGIBLE, status=Enrollment.Status.APPROVED, assistance_modality=Enrollment.AssistanceModality.NFI, approved_by=self.reviewer)
+        self.warehouse = Warehouse.objects.create(program=self.program, name="Main warehouse", location="Khartoum", person_in_charge="Storekeeper", created_by=self.manager)
+        self.item = NFIItem.objects.create(program=self.program, warehouse=self.warehouse, name="Food Kit", item_type="Food", unit="kit", initial_quantity=100, available_quantity=100, created_by=self.manager)
+        self.client = APIClient()
+
+    def test_finance_reserves_once_event_uses_entitlement_and_reviewer_records_delivery(self):
+        self.client.force_authenticate(self.finance)
+        entitlement_response = self.client.post("/api/nfi-entitlements/", {"beneficiary": str(self.beneficiary.id), "program": str(self.program.id), "warehouse": str(self.warehouse.id), "item": str(self.item.id), "quantity": 3}, format="json")
+        self.assertEqual(entitlement_response.status_code, 201, entitlement_response.data)
+        entitlement = NFIEntitlement.objects.get(id=entitlement_response.data["id"])
+        self.item.refresh_from_db()
+        self.assertEqual(self.item.available_quantity, 97)
+
+        self.client.force_authenticate(self.manager)
+        event_response = self.client.post("/api/distribution-events/", {"program": str(self.program.id), "warehouse": str(self.warehouse.id), "event_date": str(date.today()), "location": "Distribution point", "distribution_team": "Team A", "status": "PLANNED", "entitlement_ids": [str(entitlement.id)]}, format="json")
+        self.assertEqual(event_response.status_code, 201, event_response.data)
+        allocation = DistributionAllocation.objects.get(event_id=event_response.data["id"], entitlement=entitlement)
+        self.assertEqual(allocation.planned_quantity, 3)
+        self.item.refresh_from_db()
+        self.assertEqual(self.item.available_quantity, 97)
+
+        self.client.force_authenticate(self.reviewer)
+        issue_response = self.client.post("/api/distribution-issues/", {"beneficiary": str(self.beneficiary.id), "entitlement": str(entitlement.id), "item": str(self.item.id), "event": event_response.data["id"], "planned_quantity": 3, "actual_quantity": 3, "delivery_status": "RECEIVED"}, format="json")
+        self.assertEqual(issue_response.status_code, 201, issue_response.data)
+        entitlement.refresh_from_db()
+        self.assertEqual(entitlement.status, NFIEntitlement.Status.DISTRIBUTED)
+        self.assertTrue(AuditEvent.objects.filter(action="DISTRIBUTION_DELIVERY_RECORDED", entity_id=issue_response.data["id"]).exists())
+
+    def test_payment_instruction_is_rejected_for_nfi_only_program(self):
+        channel = PaymentChannelConfig.objects.create(program=self.program, channel_type=PaymentChannelConfig.ChannelType.CASH, provider_name="Simulator", currency="USD")
+        self.client.force_authenticate(self.finance)
+        response = self.client.post("/api/payment-instructions/", {"enrollment": str(self.enrollment.id), "beneficiary": str(self.beneficiary.id), "channel_config": str(channel.id), "amount": "10.00", "currency": "USD"}, format="json")
+        self.assertEqual(response.status_code, 400)
