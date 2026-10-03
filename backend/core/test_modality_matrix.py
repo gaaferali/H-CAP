@@ -3,7 +3,7 @@ from datetime import date
 from django.test import TestCase
 from rest_framework.test import APIClient
 
-from .models import Beneficiary, Complaint, Enrollment, Household, NFIItem, Program, Tenant, User, Warehouse
+from .models import Beneficiary, Complaint, Enrollment, Household, HouseholdEnrollment, NFIItem, Program, Tenant, User, Warehouse
 
 
 class ModalityMatrixTests(TestCase):
@@ -74,6 +74,12 @@ class ModalityMatrixTests(TestCase):
         self.assertEqual(enrollment.data["assistance_modality"], Enrollment.AssistanceModality.NFI)
         approved = self.client.patch(f"/api/enrollments/{enrollment.data['id']}/", {"status": "APPROVED"}, format="json")
         self.assertEqual(approved.status_code, 200, approved.data)
+        HouseholdEnrollment.objects.create(
+            household=beneficiary.household,
+            program=program,
+            status=HouseholdEnrollment.Status.APPROVED,
+            assistance_modality=Enrollment.AssistanceModality.NFI,
+        )
 
         warehouse = Warehouse.objects.create(program=program, name="NFI warehouse", location="Khartoum", created_by=self.manager)
         item = NFIItem.objects.create(program=program, warehouse=warehouse, name="Kit", item_type="Food", unit="kit", initial_quantity=10, available_quantity=10, created_by=self.manager)
@@ -83,6 +89,61 @@ class ModalityMatrixTests(TestCase):
             format="json",
         )
         self.assertEqual(entitlement.status_code, 201, entitlement.data)
+
+    def test_legacy_member_approval_does_not_authorize_new_household_entitlements(self):
+        program = self.make_program("Household approval required", True, True)
+        beneficiary = self.make_beneficiary(program, "LEGACY-ONLY")
+        legacy = self.enroll(program, beneficiary, "CASH_NFI")
+        self.assertEqual(legacy.status_code, 201, legacy.data)
+        approved = self.client.patch(
+            f"/api/enrollments/{legacy.data['id']}/",
+            {"status": "APPROVED"},
+            format="json",
+        )
+        self.assertEqual(approved.status_code, 200, approved.data)
+        warehouse = Warehouse.objects.create(
+            program=program,
+            name="Legacy-only warehouse",
+            location="Khartoum",
+            created_by=self.manager,
+        )
+        item = NFIItem.objects.create(
+            program=program,
+            warehouse=warehouse,
+            name="Legacy-only kit",
+            item_type="Food",
+            unit="kit",
+            initial_quantity=10,
+            available_quantity=10,
+            created_by=self.manager,
+        )
+
+        cash = self.client.post(
+            "/api/cash-entitlements/",
+            {
+                "household": str(beneficiary.household_id),
+                "beneficiary": str(beneficiary.id),
+                "program": str(program.id),
+                "amount": "50.00",
+                "currency": "USD",
+            },
+            format="json",
+        )
+        nfi = self.client.post(
+            "/api/nfi-entitlements/",
+            {
+                "household": str(beneficiary.household_id),
+                "beneficiary": str(beneficiary.id),
+                "program": str(program.id),
+                "warehouse": str(warehouse.id),
+                "item": str(item.id),
+                "quantity": 1,
+            },
+            format="json",
+        )
+
+        self.assertEqual(cash.status_code, 400, cash.data)
+        self.assertEqual(nfi.status_code, 400, nfi.data)
 
     def test_combined_program_allows_all_modalities(self):
         program = self.make_program("Cash and NFI", True, True)
@@ -114,9 +175,13 @@ class ModalityMatrixTests(TestCase):
             response = self.client.get(endpoint)
             self.assertEqual(response.status_code, 403, (endpoint, response.data))
 
-    def test_finance_can_manage_entitlements_but_cannot_review_delivery(self):
+    def test_finance_can_read_entitlements_and_delivery_but_cannot_write_delivery(self):
         program = self.make_program("Finance NFI", False, True)
         finance = User.objects.create_user("finance-nfi@example.test", "Finance", self.tenant, "password", role=User.Role.FINANCE)
         self.client.force_authenticate(finance)
         self.assertEqual(self.client.get("/api/nfi-entitlements/").status_code, 200)
-        self.assertEqual(self.client.get("/api/distribution-issues/").status_code, 403)
+        self.assertEqual(self.client.get("/api/distribution-events/").status_code, 200)
+        self.assertEqual(self.client.get("/api/distribution-allocations/").status_code, 200)
+        self.assertEqual(self.client.get("/api/distribution-issues/").status_code, 200)
+        response = self.client.post("/api/distribution-issues/", {}, format="json")
+        self.assertEqual(response.status_code, 403)

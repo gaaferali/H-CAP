@@ -250,8 +250,9 @@ class PaymentInstruction(models.Model):
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     batch = models.ForeignKey("PaymentBatch", on_delete=models.PROTECT, null=True, blank=True, related_name="instructions")
-    enrollment = models.ForeignKey(Enrollment, on_delete=models.PROTECT, related_name="payment_instructions")
-    beneficiary = models.ForeignKey(Beneficiary, on_delete=models.PROTECT, related_name="payment_instructions")
+    cash_entitlement = models.ForeignKey("CashEntitlement", on_delete=models.PROTECT, null=True, blank=True, related_name="payment_instructions")
+    enrollment = models.ForeignKey(Enrollment, on_delete=models.PROTECT, null=True, blank=True, related_name="payment_instructions")
+    beneficiary = models.ForeignKey(Beneficiary, on_delete=models.PROTECT, null=True, blank=True, related_name="payment_instructions")
     channel_config = models.ForeignKey(PaymentChannelConfig, on_delete=models.PROTECT, related_name="payment_instructions")
     amount = models.DecimalField(max_digits=18, decimal_places=2, validators=[MinValueValidator(0.01)])
     currency = models.CharField(max_length=3)
@@ -260,6 +261,15 @@ class PaymentInstruction(models.Model):
     idempotency_key = models.CharField(max_length=160, unique=True)
     created_by = models.ForeignKey(User, on_delete=models.PROTECT, related_name="created_payment_instructions")
     created_at = models.DateTimeField(default=django_timezone.now)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["cash_entitlement"],
+                condition=models.Q(cash_entitlement__isnull=False),
+                name="unique_payment_instruction_per_cash_entitlement",
+            )
+        ]
 
 
 class PaymentEvent(models.Model):

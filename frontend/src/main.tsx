@@ -85,6 +85,14 @@ const arabic: Record<string, string> = {
   Beneficiaries: "المستفيدون",
   "Eligibility review": "مراجعة الأهلية",
   "Enrollment decisions": "قرارات التسجيل",
+  "Household enrollment and modality": "تسجيل الأسرة ونوع المساعدة",
+  "Household cash entitlement": "استحقاق الأسرة النقدي",
+  "No eligible and approved cash households are available for this program.": "لا توجد أسر مؤهلة ومعتمدة للمساعدة النقدية في هذا البرنامج.",
+  "Select a payment program and an eligible, approved household.": "اختر برنامج دفع وأسرة مؤهلة ومعتمدة.",
+  Members: "الأفراد",
+  "NFI Entitlements": "استحقاقات المواد غير الغذائية",
+  "Distribution Events": "فعاليات التوزيع",
+  "NFI Delivery Review": "مراجعة تسليم المواد غير الغذائية",
   Payments: "المدفوعات",
   PDM: "متابعة ما بعد التوزيع",
   Complaints: "الشكاوى",
@@ -241,6 +249,28 @@ const arabic: Record<string, string> = {
   "Batch name": "اسم الدفعة",
   "Create simulated batch": "إنشاء دفعة محاكية",
   "Create simulated payment instruction": "إنشاء تعليمات دفع محاكية",
+  "Payment program": "برنامج الدفع",
+  "Approved household": "الأسرة المعتمدة",
+  "Approved household member": "فرد الأسرة المعتمد",
+  "Select a payment program before choosing a household.": "اختر برنامج الدفع قبل اختيار الأسرة.",
+  "No approved cash households are available for this program.": "لا توجد أسر نقدية معتمدة لهذا البرنامج.",
+  "No approved household members are available for this program.": "لا يوجد أفراد أسر معتمدون لهذا البرنامج.",
+  "Household NFI entitlements": "استحقاقات المواد غير الغذائية للأسر",
+  "Household entitlements": "استحقاقات الأسر",
+  "No approved NFI households are available for this program.": "لا توجد أسر معتمدة للمواد غير الغذائية لهذا البرنامج.",
+  "Program, household, item, and warehouse": "البرنامج والأسرة والصنف والمستودع",
+  "Pending household distribution allocation": "تخصيص توزيع أسري بانتظار المراجعة",
+  "Household delivery review": "مراجعة تسليم الأسرة",
+  "No pending distribution allocations are available.": "لا توجد تخصيصات توزيع معلقة.",
+  "Existing household entitlements": "استحقاقات الأسر الحالية",
+  "No remaining NFI entitlements are available for this program and warehouse.": "لا توجد استحقاقات متبقية للمواد غير الغذائية لهذا البرنامج والمستودع.",
+  "Create event from selected entitlements": "إنشاء حدث من الاستحقاقات المحددة",
+  "Distribution event history": "سجل أحداث التوزيع",
+  "Event allocations": "تخصيصات الحدث",
+  "No remaining NFI entitlements are available for this program and warehouse": "لا توجد استحقاقات متبقية للمواد غير الغذائية لهذا البرنامج والمستودع",
+  "Could not load simulated payment records.": "تعذر تحميل سجلات الدفع المحاكى.",
+  "Could not load delivery records.": "تعذر تحميل سجلات التسليم.",
+  "Could not load reviewer delivery work.": "تعذر تحميل أعمال مراجعة التسليم.",
   "Approved enrollment": "تسجيل معتمد",
   "Simulated payment channel": "قناة دفع محاكية",
   "Payment batch": "دفعة الدفع",
@@ -469,8 +499,14 @@ const arabicInline: Record<string, string> = {
   beneficiary: "المستفيد",
   Household: "الأسرة",
   household: "الأسرة",
+  Member: "الفرد",
+  members: "أفراد",
   Program: "البرنامج",
   program: "البرنامج",
+  Item: "الصنف",
+  "NFI item": "صنف مواد غير غذائية",
+  Warehouse: "المستودع",
+  planned: "المخطط",
   Tenant: "الجهة",
   tenant: "الجهة",
   Enrollment: "التسجيل",
@@ -574,6 +610,22 @@ const arabicInline: Record<string, string> = {
   "Simulated payment instructions": "تعليمات الدفع المحاكية",
   "Create simulated payment batch": "إنشاء دفعة دفع محاكية",
   "Create simulated payment instruction": "إنشاء تعليمات دفع محاكية",
+  "Payment program": "برنامج الدفع",
+  "Approved household": "الأسرة المعتمدة",
+  "Approved household member": "فرد الأسرة المعتمد",
+  "Select a payment program before choosing a household.": "اختر برنامج الدفع قبل اختيار الأسرة.",
+  "No approved cash households are available for this program.": "لا توجد أسر نقدية معتمدة لهذا البرنامج.",
+  "No approved household members are available for this program.": "لا يوجد أفراد أسر معتمدون لهذا البرنامج.",
+  "Household NFI entitlements": "استحقاقات المواد غير الغذائية للأسر",
+  "Household entitlements": "استحقاقات الأسر",
+  "No approved NFI households are available for this program.": "لا توجد أسر معتمدة للمواد غير الغذائية لهذا البرنامج.",
+  "Program, household, item, and warehouse": "البرنامج والأسرة والصنف والمستودع",
+  "Pending household distribution allocation": "تخصيص توزيع أسري بانتظار المراجعة",
+  "Household delivery review": "مراجعة تسليم الأسرة",
+  "No pending distribution allocations are available.": "لا توجد تخصيصات توزيع معلقة.",
+  "Could not load simulated payment records.": "تعذر تحميل سجلات الدفع المحاكى.",
+  "Could not load delivery records.": "تعذر تحميل سجلات التسليم.",
+  "Could not load reviewer delivery work.": "تعذر تحميل أعمال مراجعة التسليم.",
   "Create simulated batch": "إنشاء دفعة محاكية",
   "Create simulated instruction": "إنشاء تعليمات محاكية",
   "Append-only payment events": "أحداث الدفع غير القابلة للتعديل",
@@ -723,10 +775,10 @@ const roleRoutes: Record<Route, Role[]> = {
   ],
   tenants: ["ADMIN"],
   programs: ["ADMIN", "MANAGER", "FINANCE"],
-  households: ["ADMIN", "FIELD_OFFICER", "MANAGER"],
-  beneficiaries: ["ADMIN", "FIELD_OFFICER", "REVIEWER", "MANAGER"],
+  households: ["ADMIN", "FIELD_OFFICER", "MANAGER", "FINANCE"],
+  beneficiaries: ["ADMIN", "FIELD_OFFICER", "REVIEWER", "MANAGER", "FINANCE"],
   eligibility: ["ADMIN", "REVIEWER", "MANAGER"],
-  enrollment: ["ADMIN", "REVIEWER", "MANAGER"],
+  enrollment: ["ADMIN", "REVIEWER", "MANAGER", "FINANCE"],
   payments: ["ADMIN", "FINANCE", "MANAGER", "AUDITOR"],
   pdm: ["ADMIN", "SUPPORT", "FIELD_OFFICER", "MANAGER", "AUDITOR"],
   complaints: ["ADMIN", "SUPPORT", "MANAGER"],
@@ -754,12 +806,14 @@ const roleRoutes: Record<Route, Role[]> = {
     "ADMIN",
     "MANAGER",
     "REVIEWER",
+    "FINANCE",
     "AUDITOR",
   ],
   delivery_review: [
     "ADMIN",
     "MANAGER",
     "REVIEWER",
+    "FINANCE",
     "AUDITOR",
   ],
   users: ["ADMIN", "MANAGER"],
@@ -908,9 +962,11 @@ function FunctionHelp({ children }: { children: ReactNode }) {
 function Table({
   headings,
   rows,
+  loading = false,
 }: {
   headings: string[];
   rows: ReactNode[][];
+  loading?: boolean;
 }) {
   const translate = useTranslation();
   return (
@@ -926,7 +982,11 @@ function Table({
           </tr>
         </thead>
         <tbody>
-          {rows.length ? (
+          {loading ? (
+            <tr>
+              <td colSpan={headings.length}>{translate("Loading")}</td>
+            </tr>
+          ) : rows.length ? (
             rows.map((row, rowIndex) => (
               <tr key={rowIndex}>
                 {row.map((cell, cellIndex) => (
@@ -976,7 +1036,9 @@ function Field({
   required = false,
   help,
   defaultValue,
+  value,
   disabled = false,
+  readOnly = false,
 }: {
   label: string;
   name: string;
@@ -984,7 +1046,9 @@ function Field({
   required?: boolean;
   help?: string;
   defaultValue?: string;
+  value?: string;
   disabled?: boolean;
+  readOnly?: boolean;
 }) {
   const translate = useTranslation();
   const id = `field-${name}`;
@@ -1005,8 +1069,10 @@ function Field({
         name={name}
         type={type}
         required={required && !paymentOnly}
-        defaultValue={defaultValue}
+        defaultValue={value === undefined ? defaultValue : undefined}
+        value={value}
         disabled={disabled}
+        readOnly={readOnly}
       />
       {help && <div className="form-text">{translate(help)}</div>}
     </div>
@@ -1598,7 +1664,7 @@ function ProgramsPage({ role }: { role: Role }) {
                 required
               />
               <Field label="Channel currency" name="currency" required />
-              <button className="btn btn-outline-primary">
+              <button className="btn btn-outline-primary" disabled={status === "saving"}>
                 Save simulated channel
               </button>
             </form>
@@ -2170,6 +2236,7 @@ function Intake({ beneficiary, role }: { beneficiary: boolean; role: Role }) {
   const [createdHousehold, setCreatedHousehold] = useState<Entity | null>(null);
   const [status, setStatus] = useState("");
   const [error, setError] = useState("");
+  const canWrite = !["FINANCE", "REVIEWER", "AUDITOR"].includes(role);
   const load = async () => {
     try {
       const [recordResponse, programResponse, householdResponse] = await Promise.all([
@@ -2304,7 +2371,7 @@ function Intake({ beneficiary, role }: { beneficiary: boolean; role: Role }) {
     );
   return (
     <div className="row g-3">
-      <div className="col-xl-5">
+      {canWrite && <div className="col-xl-5">
         <Panel title={title}>
           <form onSubmit={save}>
             {beneficiary ? (
@@ -2410,8 +2477,8 @@ function Intake({ beneficiary, role }: { beneficiary: boolean; role: Role }) {
           )}
           <Message status={status} error={error} />
         </Panel>
-      </div>
-      <div className="col-xl-7">
+      </div>}
+      <div className={canWrite ? "col-xl-7" : "col-12"}>
         <Panel title={beneficiary ? "Beneficiaries" : "Households"}>
           {beneficiary ? (
             <Table
@@ -2475,7 +2542,7 @@ function Intake({ beneficiary, role }: { beneficiary: boolean; role: Role }) {
   );
 }
 
-function EligibilityPage() {
+function EligibilityPage({ role }: { role: Role }) {
   const [programs, setPrograms] = useState<Entity[]>([]);
   const [households, setHouseholds] = useState<Entity[]>([]);
   const [selectedProgram, setSelectedProgram] = useState("");
@@ -2485,6 +2552,7 @@ function EligibilityPage() {
   const [tasks, setTasks] = useState<Entity[]>([]);
   const [status, setStatus] = useState("");
   const [error, setError] = useState("");
+  const canDecide = role !== "FINANCE";
   const load = async () => {
     try {
       const [
@@ -2492,22 +2560,27 @@ function EligibilityPage() {
         householdResponse,
         eligibilityResponse,
         enrollmentResponse,
-        signalResponse,
-        taskResponse,
       ] = await Promise.all([
         api.list<Entity>("programs"),
         api.list<Entity>("households"),
         api.list<Entity>("household-eligibility"),
-        api.list<Entity>("enrollments"),
-        api.list<Entity>("ai-signals"),
-        api.list<Entity>("review-tasks"),
+        api.list<Entity>("household-enrollments"),
       ]);
       setPrograms(listItems(programResponse));
       setHouseholds(listItems(householdResponse));
       setEligibility(listItems(eligibilityResponse));
       setEnrollments(listItems(enrollmentResponse));
-      setSignals(listItems(signalResponse));
-      setTasks(listItems(taskResponse));
+      if (canDecide) {
+        const [signalResponse, taskResponse] = await Promise.all([
+          api.list<Entity>("ai-signals"),
+          api.list<Entity>("review-tasks"),
+        ]);
+        setSignals(listItems(signalResponse));
+        setTasks(listItems(taskResponse));
+      } else {
+        setSignals([]);
+        setTasks([]);
+      }
     } catch (reason) {
       setError(
         reason instanceof Error
@@ -2518,7 +2591,7 @@ function EligibilityPage() {
   };
   useEffect(() => {
     void load();
-  }, []);
+  }, [canDecide]);
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     const formElement = event.currentTarget;
@@ -2569,7 +2642,7 @@ function EligibilityPage() {
   return (
     <div className="row g-3">
       <div className="col-lg-5">
-        <Panel title="Eligibility review">
+        {canDecide && <Panel title="Eligibility review">
           <form onSubmit={submit}>
             <SelectField
               label="Program"
@@ -2602,8 +2675,8 @@ function EligibilityPage() {
             <button className="btn btn-primary">Create human review</button>
           </form>
           <Message status={status} error={error} />
-        </Panel>
-        <Panel title="Update eligibility status">
+        </Panel>}
+        {canDecide && <Panel title="Update eligibility status">
           <p className="section-lead">
              Select an existing household eligibility review to save a new status.
           </p>
@@ -2628,7 +2701,7 @@ function EligibilityPage() {
             <button className="btn btn-primary">Save eligibility status</button>
           </form>
           <Message status={status} error={error} />
-        </Panel>
+        </Panel>}
       </div>
       <div className="col-lg-7">
         <Panel title="Eligibility and advisory work">
@@ -2760,23 +2833,27 @@ function EnrollmentDecisionPage() {
   );
 }
 
-function EnrollmentModalityPage() {
+function EnrollmentModalityPage({ role }: { role: Role }) {
   const [enrollments, setEnrollments] = useState<Entity[]>([]);
   const [programs, setPrograms] = useState<Entity[]>([]);
   const [eligibility, setEligibility] = useState<Entity[]>([]);
   const [selectedProgramId, setSelectedProgramId] = useState("");
+  const [selectedHouseholdId, setSelectedHouseholdId] = useState("");
   const [status, setStatus] = useState("");
   const [error, setError] = useState("");
+  const canDecide = role !== "FINANCE";
   const load = async () => {
     try {
-      const [enrollmentResponse, programResponse, eligibilityResponse] = await Promise.all([
-        api.list<Entity>("household-enrollments"),
-        api.list<Entity>("programs"),
-        api.list<Entity>("household-eligibility"),
-      ]);
+      const enrollmentResponse = await api.list<Entity>("household-enrollments");
       setEnrollments(listItems(enrollmentResponse));
-      setPrograms(listItems(programResponse));
-      setEligibility(listItems(eligibilityResponse));
+      if (role !== "FINANCE") {
+        const [programResponse, eligibilityResponse] = await Promise.all([
+          api.list<Entity>("programs"),
+          api.list<Entity>("household-eligibility"),
+        ]);
+        setPrograms(listItems(programResponse));
+        setEligibility(listItems(eligibilityResponse));
+      }
     } catch (reason) {
       setError(
         reason instanceof Error
@@ -2802,6 +2879,7 @@ function EnrollmentModalityPage() {
         assistance_modality: form.get("assistance_modality"),
       });
       formElement.reset();
+      setSelectedHouseholdId("");
       await load();
       setStatus("saved");
     } catch (reason) {
@@ -2829,7 +2907,7 @@ function EnrollmentModalityPage() {
           : [];
   return (
     <div className="row g-3">
-      <div className="col-lg-5">
+      {canDecide && <div className="col-lg-5">
         <Panel title="Household enrollment and modality">
           <form onSubmit={submit}>
             <SelectField
@@ -2840,7 +2918,10 @@ function EnrollmentModalityPage() {
                 label: programLabel(item),
               }))}
               value={selectedProgramId}
-              onChange={setSelectedProgramId}
+              onChange={(value) => {
+                setSelectedProgramId(value);
+                setSelectedHouseholdId("");
+              }}
               required
             />
             <SelectField
@@ -2850,6 +2931,9 @@ function EnrollmentModalityPage() {
                 value: valueOf(item, "household"),
                 label: `${valueOf(item, "household_reference") || "Household"} — ${valueOf(item, "member_count") || 0} members`,
               }))}
+              value={selectedHouseholdId}
+              onChange={setSelectedHouseholdId}
+              disabled={!selectedProgramId}
               required
             />
             <SelectField
@@ -2886,8 +2970,8 @@ function EnrollmentModalityPage() {
           </form>
           <Message status={status} error={error} />
         </Panel>
-      </div>
-      <div className="col-lg-7">
+      </div>}
+      <div className={canDecide ? "col-lg-7" : "col-12"}>
         <Panel title="Enrollment history">
           <Table
             headings={[
@@ -2897,13 +2981,15 @@ function EnrollmentModalityPage() {
               "Modality",
               "Decision",
             ]}
-            rows={enrollments.map((item) => [
+            rows={enrollments
+              .filter((item) => role !== "FINANCE" || ["APPROVED", "ACCEPTED"].includes(valueOf(item, "status")))
+              .map((item) => [
               valueOf(item, "household_reference") || "Household",
               valueOf(item, "program_name"),
               valueOf(item, "member_count") || 0,
               valueOf(item, "assistance_modality") || "CASH",
               <Badge value={valueOf(item, "status") || "PENDING"} />,
-            ])}
+              ])}
           />
         </Panel>
       </div>
@@ -2913,24 +2999,35 @@ function EnrollmentModalityPage() {
 
 function PaymentsPage({ role }: { role: Role }) {
   const [programs, setPrograms] = useState<Entity[]>([]);
-  const [enrollments, setEnrollments] = useState<Entity[]>([]);
+  const [cashEntitlements, setCashEntitlements] = useState<Entity[]>([]);
+  const [householdEnrollments, setHouseholdEnrollments] = useState<Entity[]>([]);
   const [batches, setBatches] = useState<Entity[]>([]);
   const [instructions, setInstructions] = useState<Entity[]>([]);
   const [channels, setChannels] = useState<Entity[]>([]);
   const [programId, setProgramId] = useState("");
+  const [householdId, setHouseholdId] = useState("");
+  const [channelId, setChannelId] = useState("");
+  const [batchId, setBatchId] = useState("");
   const [events, setEvents] = useState<Entity[]>([]);
   const [status, setStatus] = useState("");
   const [error, setError] = useState("");
-  const canWrite = role !== "AUDITOR";
+  const [loading, setLoading] = useState(true);
+  const [channelsLoading, setChannelsLoading] = useState(false);
+  const [eventsLoading, setEventsLoading] = useState(false);
+  const canWrite = ["ADMIN", "FINANCE", "MANAGER"].includes(role);
   const load = async () => {
+    setLoading(true);
+    setError("");
     try {
       const [
         programResponse,
+        cashEntitlementResponse,
         enrollmentResponse,
         batchResponse,
         instructionResponse,
       ] = await Promise.all([
         api.list<Entity>("programs"),
+        api.list<Entity>("cash-entitlements"),
         api.list<Entity>("household-enrollments"),
         api.list<Entity>("payment-batches"),
         api.list<Entity>("payment-instructions"),
@@ -2938,7 +3035,8 @@ function PaymentsPage({ role }: { role: Role }) {
       setPrograms(
         listItems(programResponse).filter((program) => program.cash_enabled),
       );
-      setEnrollments(listItems(enrollmentResponse));
+      setCashEntitlements(listItems(cashEntitlementResponse));
+      setHouseholdEnrollments(listItems(enrollmentResponse));
       setBatches(listItems(batchResponse));
       setInstructions(listItems(instructionResponse));
     } catch (reason) {
@@ -2947,6 +3045,8 @@ function PaymentsPage({ role }: { role: Role }) {
           ? reason.message
           : "Could not load simulated payment records.",
       );
+    } finally {
+      setLoading(false);
     }
   };
   useEffect(() => {
@@ -2956,9 +3056,12 @@ function PaymentsPage({ role }: { role: Role }) {
     const loadChannels = async () => {
       if (!programId) {
         setChannels([]);
+        setChannelsLoading(false);
         return;
       }
+      setChannelsLoading(true);
       try {
+        setError("");
         setChannels(
           await api.get<Entity[]>(`/programs/${programId}/channels/`),
         );
@@ -2968,6 +3071,8 @@ function PaymentsPage({ role }: { role: Role }) {
             ? reason.message
             : "Could not load simulated payment channels.",
         );
+      } finally {
+        setChannelsLoading(false);
       }
     };
     void loadChannels();
@@ -3001,23 +3106,24 @@ function PaymentsPage({ role }: { role: Role }) {
     event.preventDefault();
     const formElement = event.currentTarget;
     const form = new FormData(formElement);
-    const enrollment = enrollments.find(
-      (item) => item.id === String(form.get("enrollment")),
+    const selectedHousehold = eligibleHouseholds.find(
+      (item) => valueOf(item, "household") === householdId,
     );
-    if (!enrollment) {
-      setError("Select an approved enrollment.");
+    const selectedEntitlement = selectedHouseholdEntitlement;
+    if (!programId || !householdId || !selectedHousehold || !paymentAmount || !paymentCurrency) {
+      setError("Select a payment program and an eligible, approved household.");
       return;
     }
     setStatus("saving");
     setError("");
     try {
       const payload: Record<string, unknown> = {
-        enrollment: enrollment.id,
-        beneficiary: valueOf(enrollment, "beneficiary"),
+        household: householdId,
         channel_config: form.get("channel_config"),
-        amount: form.get("amount"),
-        currency: form.get("currency"),
+        amount: paymentAmount,
+        currency: paymentCurrency,
       };
+      if (selectedEntitlement) payload.cash_entitlement = selectedEntitlement.id;
       if (form.get("batch")) payload.batch = form.get("batch");
       await api.create("payment-instructions", payload);
       formElement.reset();
@@ -3072,6 +3178,9 @@ function PaymentsPage({ role }: { role: Role }) {
         : [current];
   };
   const viewEvents = async (instructionId: string) => {
+    setEvents([]);
+    setEventsLoading(true);
+    setError("");
     try {
       setEvents(
         await api.get<Entity[]>(
@@ -3084,13 +3193,36 @@ function PaymentsPage({ role }: { role: Role }) {
           ? reason.message
           : "Could not load payment events.",
       );
+    } finally {
+      setEventsLoading(false);
     }
   };
-  const selectedEnrollments = enrollments.filter(
+  const selectedCashEntitlements = cashEntitlements.filter(
     (item) =>
-      item.status === "APPROVED" &&
-      (!programId || valueOf(item, "program") === programId),
+      valueOf(item, "status") === "ACTIVE" &&
+      valueOf(item, "program") === programId &&
+      Boolean(valueOf(item, "household")),
   );
+  const eligibleHouseholds = householdEnrollments.filter(
+    (item) =>
+      valueOf(item, "program") === programId &&
+      valueOf(item, "eligibility_status") === "ELIGIBLE" &&
+      valueOf(item, "status") === "APPROVED" &&
+      ["CASH", "CASH_NFI"].includes(valueOf(item, "assistance_modality")),
+  ).filter(
+    (item, index, all) =>
+      all.findIndex(
+        (candidate) => valueOf(candidate, "household") === valueOf(item, "household"),
+      ) === index,
+  );
+  const selectedHouseholdEntitlement = selectedCashEntitlements.find(
+    (item) => valueOf(item, "household") === householdId,
+  );
+  const selectedProgram = programs.find((program) => program.id === programId);
+  const paymentAmount =
+    selectedHouseholdEntitlement?.amount ?? selectedProgram?.transfer_amount ?? "";
+  const paymentCurrency =
+    selectedHouseholdEntitlement?.currency ?? selectedProgram?.currency ?? "";
   const selectedBatches = batches.filter(
     (batch) => !programId || valueOf(batch, "program") === programId,
   );
@@ -3118,25 +3250,44 @@ function PaymentsPage({ role }: { role: Role }) {
             </Panel>
             <Panel title="Create simulated payment instruction">
               <SelectField
-                label="Program"
+                label="Payment program"
                 name="payment-program"
                 options={programs.map((program) => ({
                   value: program.id,
                   label: programLabel(program),
                 }))}
                 value={programId}
-                onChange={setProgramId}
+                onChange={(value) => {
+                  setProgramId(value);
+                  setHouseholdId("");
+                  setChannelId("");
+                  setBatchId("");
+                }}
+                required
               />
               <form onSubmit={createInstruction}>
                 <SelectField
-                  label="Approved enrollment"
-                  name="enrollment"
-                  options={selectedEnrollments.map((item) => ({
-                    value: item.id,
-                    label: enrollmentLabel(item),
+                  label="Approved household"
+                  name="payment-household"
+                  options={eligibleHouseholds.map((item) => ({
+                    value: valueOf(item, "household"),
+                    label: `${valueOf(item, "household_reference") || "Household"} — size ${valueOf(item, "household_size") || "?"} — ${valueOf(item, "member_count") || 0} members — ${valueOf(item, "assistance_modality")}`,
                   }))}
+                  value={householdId}
+                  onChange={setHouseholdId}
+                  disabled={!programId}
                   required
                 />
+                {!programId && (
+                  <p className="form-text">
+                    Select a payment program before choosing a household.
+                  </p>
+                )}
+                {programId && eligibleHouseholds.length === 0 && (
+                  <p className="form-text">
+                    No eligible and approved cash households are available for this program.
+                  </p>
+                )}
                 <SelectField
                   label="Simulated payment channel"
                   name="channel_config"
@@ -3144,8 +3295,12 @@ function PaymentsPage({ role }: { role: Role }) {
                     value: channel.id,
                     label: `${valueOf(channel, "provider_name")} (${valueOf(channel, "channel_type")})`,
                   }))}
+                  value={channelId}
+                  onChange={setChannelId}
+                  disabled={!programId || channelsLoading}
                   required
                 />
+                {channelsLoading && <p className="form-text">Loading</p>}
                 <SelectField
                   label="Payment batch"
                   name="batch"
@@ -3153,14 +3308,29 @@ function PaymentsPage({ role }: { role: Role }) {
                     value: batch.id,
                     label: batch.name ?? "Simulated batch",
                   }))}
+                  value={batchId}
+                  onChange={setBatchId}
                 />
-                <Field label="Amount" name="amount" type="number" required />
-                <Field label="Currency" name="currency" required />
+                <Field
+                  label="Amount"
+                  name="amount"
+                  type="number"
+                  value={paymentAmount}
+                  readOnly
+                  required
+                />
+                <Field
+                  label="Currency"
+                  name="currency"
+                  value={paymentCurrency}
+                  readOnly
+                  required
+                />
                 <p className="form-text">
                   This uses the built-in simulator only. No external payment
                   provider is called.
                 </p>
-                <button className="btn btn-primary">
+                <button className="btn btn-primary" disabled={status === "saving" || channelsLoading}>
                   Create simulated instruction
                 </button>
               </form>
@@ -3171,47 +3341,75 @@ function PaymentsPage({ role }: { role: Role }) {
       <div className="col-xl-7">
         <Panel title="Simulated payment instructions">
           <Table
+            loading={loading}
             headings={[
-              "Beneficiary",
+              "Household",
+              "Household size",
+              "Members",
+              "Member context",
               "Program",
               "Channel",
               "Amount",
               "Status",
               "Actions",
             ]}
-            rows={instructions.map((item) => [
-              valueOf(item, "beneficiary_name") || "Beneficiary",
-              valueOf(item, "program_name") || "Program",
-              valueOf(item, "channel_name") || "Simulated channel",
-              `${valueOf(item, "amount")} ${valueOf(item, "currency")}`,
-              canWrite ? (
-                <select
-                  className="form-select form-select-sm"
-                  aria-label={`Status for ${valueOf(item, "beneficiary_name") || "beneficiary"}`}
-                  value={String(item.status ?? "CREATED")}
-                  onChange={(event) => chooseStatus(item, event.target.value)}
+            rows={instructions.map((item) => {
+              const entitlement = cashEntitlements.find(
+                (record) => record.id === valueOf(item, "cash_entitlement"),
+              );
+              const householdEnrollment = householdEnrollments.find(
+                (record) => record.id === valueOf(item, "enrollment"),
+              );
+              return [
+                valueOf(entitlement, "household_reference") ||
+                  valueOf(householdEnrollment, "household_reference") ||
+                  "Household",
+                  valueOf(entitlement, "household_size") ||
+                    valueOf(householdEnrollment, "household_size") ||
+                    "—",
+                  valueOf(entitlement, "household_member_count") ||
+                    valueOf(householdEnrollment, "member_count") ||
+                    0,
+                  (entitlement?.household_members as Entity[] | undefined)
+                    ?.map((member) => member.full_name)
+                    .filter(Boolean)
+                    .join(", ") ||
+                    valueOf(item, "beneficiary_name") ||
+                    "Not recorded",
+                valueOf(item, "program_name") || "Program",
+                valueOf(item, "channel_name") || "Simulated channel",
+                `${valueOf(item, "amount")} ${valueOf(item, "currency")}`,
+                canWrite ? (
+                  <select
+                    className="form-select form-select-sm"
+                    aria-label={`Status for ${valueOf(item, "beneficiary_name") || "beneficiary"}`}
+                    value={String(item.status ?? "CREATED")}
+                    onChange={(event) => chooseStatus(item, event.target.value)}
+                    disabled={status === "saving"}
+                  >
+                    {paymentStatusOptions(item).map((option) => (
+                      <option key={option} value={option}>
+                        {option}
+                      </option>
+                    ))}
+                  </select>
+                ) : (
+                  <Badge value={item.status ?? "CREATED"} />
+                ),
+                <button
+                  className="btn btn-sm btn-outline-secondary"
+                  onClick={() => void viewEvents(item.id)}
                 >
-                  {paymentStatusOptions(item).map((option) => (
-                    <option key={option} value={option}>
-                      {option}
-                    </option>
-                  ))}
-                </select>
-              ) : (
-                <Badge value={item.status ?? "CREATED"} />
-              ),
-              <button
-                className="btn btn-sm btn-outline-secondary"
-                onClick={() => void viewEvents(item.id)}
-              >
-                Events
-              </button>,
-            ])}
+                  Events
+                </button>,
+              ];
+            })}
           />
         </Panel>
-        {events.length > 0 && (
+        {(eventsLoading || events.length > 0) && (
           <Panel title="Append-only payment events">
             <Table
+              loading={eventsLoading}
               headings={["Event", "Provider status", "From", "To", "Time"]}
               rows={events.map((event) => [
                 valueOf(event, "event_type"),
@@ -5744,10 +5942,15 @@ function NfiEntitlementsPage({ role }: { role: Role }) {
   const [items, setItems] = useState<Entity[]>([]);
   const [entitlements, setEntitlements] = useState<Entity[]>([]);
   const [programId, setProgramId] = useState("");
+  const [householdId, setHouseholdId] = useState("");
   const [warehouseId, setWarehouseId] = useState("");
+  const [itemId, setItemId] = useState("");
   const [status, setStatus] = useState("");
   const [error, setError] = useState("");
+  const [loading, setLoading] = useState(true);
   const load = async () => {
+    setLoading(true);
+    setError("");
     try {
       const [
         programResponse,
@@ -5757,7 +5960,7 @@ function NfiEntitlementsPage({ role }: { role: Role }) {
         entitlementResponse,
       ] = await Promise.all([
         api.list<Entity>("programs"),
-        api.list<Entity>("enrollments"),
+        api.list<Entity>("household-enrollments"),
         api.list<Entity>("warehouses"),
         api.list<Entity>("nfi-items"),
         api.list<Entity>("nfi-entitlements"),
@@ -5775,6 +5978,8 @@ function NfiEntitlementsPage({ role }: { role: Role }) {
           ? reason.message
           : "Could not load NFI entitlement data.",
       );
+    } finally {
+      setLoading(false);
     }
   };
   useEffect(() => {
@@ -5782,9 +5987,14 @@ function NfiEntitlementsPage({ role }: { role: Role }) {
   }, []);
   const validEnrollments = enrollments.filter(
     (row) =>
+      Boolean(valueOf(row, "household")) &&
       valueOf(row, "program") === programId &&
       ["ACCEPTED", "APPROVED"].includes(valueOf(row, "status")) &&
       ["NFI", "CASH_NFI"].includes(valueOf(row, "assistance_modality")),
+  );
+  const eligibleHouseholds = validEnrollments.filter(
+    (row, index, all) =>
+      all.findIndex((candidate) => valueOf(candidate, "household") === valueOf(row, "household")) === index,
   );
   const programWarehouses = warehouses.filter(
     (row) => valueOf(row, "program") === programId && row.active !== false,
@@ -5805,14 +6015,16 @@ function NfiEntitlementsPage({ role }: { role: Role }) {
     try {
       await api.create("nfi-entitlements", {
         program: programId,
-        household: form.get("household"),
-        warehouse: form.get("warehouse"),
-        item: form.get("item"),
+        household: householdId,
+        warehouse: warehouseId,
+        item: itemId,
         quantity: Number(form.get("quantity")),
         status: "ACTIVE",
       });
       formElement.reset();
       setWarehouseId("");
+      setHouseholdId("");
+      setItemId("");
       await load();
       setStatus("saved");
     } catch (reason) {
@@ -5854,18 +6066,27 @@ function NfiEntitlementsPage({ role }: { role: Role }) {
                 onChange={(value) => {
                   setProgramId(value);
                   setWarehouseId("");
+                  setHouseholdId("");
+                  setItemId("");
                 }}
                 required
               />
               <SelectField
-              label="Approved NFI household"
-              name="household"
-              options={validEnrollments.map((row) => ({
+                label="Approved NFI household"
+                name="household"
+                options={eligibleHouseholds.map((row) => ({
                   value: valueOf(row, "household"),
-                  label: `${valueOf(row, "household_reference") || "Household"} — ${valueOf(row, "member_count") || 0} members — ${valueOf(row, "assistance_modality")}`,
+                  label: `${valueOf(row, "household_reference") || "Household"} — ${valueOf(row, "household_size") || "?"} household size — ${valueOf(row, "member_count") || 0} members — ${valueOf(row, "assistance_modality")}`,
                 }))}
+                value={householdId}
+                onChange={setHouseholdId}
                 required
               />
+              {programId && eligibleHouseholds.length === 0 && (
+                <p className="form-text">
+                  No approved NFI households are available for this program.
+                </p>
+              )}
               <SelectField
                 label="Warehouse"
                 name="warehouse"
@@ -5874,7 +6095,10 @@ function NfiEntitlementsPage({ role }: { role: Role }) {
                   label: `${row.name} — ${valueOf(row, "location")}`,
                 }))}
                 value={warehouseId}
-                onChange={setWarehouseId}
+                onChange={(value) => {
+                  setWarehouseId(value);
+                  setItemId("");
+                }}
                 required
               />
               <SelectField
@@ -5884,6 +6108,8 @@ function NfiEntitlementsPage({ role }: { role: Role }) {
                   value: row.id,
                   label: `${row.name} (${valueOf(row, "item_type")}): ${valueOf(row, "available_quantity")} available`,
                 }))}
+                value={itemId}
+                onChange={setItemId}
                 required
               />
               <Field
@@ -5892,7 +6118,7 @@ function NfiEntitlementsPage({ role }: { role: Role }) {
                 type="number"
                 required
               />
-              <button className="btn btn-primary" disabled={!programId}>
+              <button className="btn btn-primary" disabled={!programId || status === "saving"}>
                 Reserve stock and save entitlement
               </button>
             </form>
@@ -5903,9 +6129,12 @@ function NfiEntitlementsPage({ role }: { role: Role }) {
       <div className={canWrite ? "col-xl-7" : "col-12"}>
         <Panel title="Saved NFI entitlements">
           <Table
+            loading={loading}
             headings={[
               "Program",
               "Household",
+              "Household size",
+              "Member count",
               "Member",
               "Item",
               "Warehouse",
@@ -5915,7 +6144,14 @@ function NfiEntitlementsPage({ role }: { role: Role }) {
             rows={entitlements.map((row) => [
               valueOf(row, "program_name") || "Program",
               valueOf(row, "household_reference") || "Household",
-              nfiBeneficiaryLabel(row) || "Not recorded",
+              valueOf(row, "household_size"),
+              valueOf(row, "household_member_count"),
+              (row.household_members as Entity[] | undefined)
+                ?.map((member) => member.full_name)
+                .filter(Boolean)
+                .join(", ") ||
+                nfiBeneficiaryLabel(row) ||
+                "Not recorded",
               valueOf(row, "item_name") || "NFI item",
               valueOf(row, "warehouse_name") || "Warehouse",
               valueOf(row, "quantity"),
@@ -5940,7 +6176,10 @@ function DistributionEventsPage({ role }: { role: Role }) {
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [status, setStatus] = useState("");
   const [error, setError] = useState("");
+  const [loading, setLoading] = useState(true);
   const load = async () => {
+    setLoading(true);
+    setError("");
     try {
       const [
         programResponse,
@@ -5968,22 +6207,30 @@ function DistributionEventsPage({ role }: { role: Role }) {
           ? reason.message
           : "Could not load distribution events.",
       );
+    } finally {
+      setLoading(false);
     }
   };
   useEffect(() => {
     void load();
   }, []);
   const eligible = entitlements.filter(
-    (row) =>
-      valueOf(row, "program") === programId &&
-      valueOf(row, "warehouse") === warehouseId &&
-      valueOf(row, "status") === "ACTIVE" &&
-      !allocations.some(
-        (allocation) =>
-          valueOf(allocation, "entitlement") === row.id &&
-          Number(allocation.allocated_quantity ?? 0) >=
-            Number(row.quantity ?? 0),
-      ),
+    (row) => {
+      const allocated = allocations
+        .filter((allocation) => valueOf(allocation, "entitlement") === row.id)
+        .reduce(
+          (total, allocation) =>
+            total + Number(allocation.allocated_quantity ?? 0),
+          0,
+        );
+      return (
+        valueOf(row, "program") === programId &&
+        valueOf(row, "warehouse") === warehouseId &&
+        valueOf(row, "status") === "ACTIVE" &&
+        Boolean(valueOf(row, "household")) &&
+        Number(row.quantity ?? 0) - allocated > 0
+      );
+    },
   );
   const toggle = (id: string) =>
     setSelectedIds((current) =>
@@ -6083,7 +6330,7 @@ function DistributionEventsPage({ role }: { role: Role }) {
               <Textarea label="Distribution notes" name="notes" />
               <div className="mb-3">
                 <label className="form-label">
-                  Existing beneficiary entitlements
+                  Existing household entitlements
                 </label>
                 {eligible.length ? (
                   eligible.map((row) => (
@@ -6100,20 +6347,36 @@ function DistributionEventsPage({ role }: { role: Role }) {
                         htmlFor={`entitlement-${row.id}`}
                       >
                         {nfiEntitlementLabel(row)} —
-                        planned/allocated {valueOf(row, "quantity")}
+                        remaining{" "}
+                        {Number(row.quantity ?? 0) -
+                          allocations
+                            .filter(
+                              (allocation) =>
+                                valueOf(allocation, "entitlement") === row.id,
+                            )
+                            .reduce(
+                              (total, allocation) =>
+                                total +
+                                Number(allocation.allocated_quantity ?? 0),
+                              0,
+                            )}{" "}
+                        of {valueOf(row, "quantity")}
                       </label>
                     </div>
                   ))
                 ) : (
                   <p className="form-text">
-                    No remaining NFI entitlements are available for this program
-                    and warehouse.
+                    {!programId
+                      ? "Select a program to see eligible household entitlements."
+                      : !warehouseId
+                        ? "Select a warehouse to see remaining household entitlements."
+                        : "No remaining NFI entitlements are available for this program and warehouse."}
                   </p>
                 )}
               </div>
               <button
                 className="btn btn-primary"
-                disabled={!selectedIds.length}
+                disabled={!selectedIds.length || status === "saving"}
               >
                 Create event from selected entitlements
               </button>
@@ -6125,22 +6388,49 @@ function DistributionEventsPage({ role }: { role: Role }) {
       <div className={canWrite ? "col-xl-7" : "col-12"}>
         <Panel title="Distribution event history">
           <Table
-            headings={["Date", "Program", "Warehouse", "Location", "Status"]}
+            loading={loading}
+            headings={[
+              "Date",
+              "Program",
+              "Warehouse",
+              "Location",
+              "Status",
+              "Notes",
+            ]}
             rows={events.map((row) => [
               valueOf(row, "event_date"),
               valueOf(row, "program_name") || "Program",
               valueOf(row, "warehouse_name") || "Warehouse",
               valueOf(row, "location"),
               <Badge value={valueOf(row, "status")} />,
+              valueOf(row, "notes"),
             ])}
           />
         </Panel>
         <Panel title="Event allocations">
           <Table
-            headings={["Event", "Beneficiary", "Item", "Planned", "Allocated"]}
+            loading={loading}
+            headings={[
+              "Event",
+              "Program",
+              "Household",
+              "Household size",
+              "Members",
+              "Member names",
+              "Item",
+              "Planned",
+              "Allocated",
+            ]}
             rows={allocations.map((row) => [
               distributionEventLabel(row),
-              nfiBeneficiaryLabel(row),
+              valueOf(row, "program_name") || "Program",
+              valueOf(row, "household_reference") || "Household",
+              valueOf(row, "household_size"),
+              valueOf(row, "household_member_count"),
+              (row.household_members as Entity[] | undefined)
+                ?.map((member) => member.full_name)
+                .filter(Boolean)
+                .join(", ") || "Not recorded",
               valueOf(row, "item_name") || "NFI item",
               valueOf(row, "planned_quantity"),
               valueOf(row, "allocated_quantity"),
@@ -6148,9 +6438,12 @@ function DistributionEventsPage({ role }: { role: Role }) {
           />
         </Panel>
         {!canWrite && (
-          <p className="form-text">
-            Your existing role can view events but cannot create them.
-          </p>
+          <>
+            <p className="form-text">
+              Your existing role can view events but cannot create them.
+            </p>
+            <Message status="" error={error} />
+          </>
         )}
       </div>
     </div>
@@ -6219,7 +6512,7 @@ function ReviewerDeliveryPage({ role }: { role: Role }) {
       <div className="col-12">
         <Panel title="Reviewer NFI delivery decisions">
           <p className="section-lead">
-            Record the final delivery result for accepted beneficiary NFI
+            Record the final delivery result for approved household NFI
             entitlements. Stock, entitlement status, and the audit trail are
             updated by the backend.
           </p>
@@ -6287,9 +6580,14 @@ function ReviewerDeliveryPage({ role }: { role: Role }) {
               "Event",
               "Program",
               "Household",
+              "Household size",
+              "Member count",
               "Planned",
               "Actual",
+              "Item",
+              "Warehouse",
               "Result",
+              "Members",
               "Notes",
             ]}
             rows={issues.map((row) => [
@@ -6297,9 +6595,17 @@ function ReviewerDeliveryPage({ role }: { role: Role }) {
               distributionEventLabel(row),
               valueOf(row, "program_name") || "Program",
               valueOf(row, "household_reference") || "Household",
+              valueOf(row, "household_size"),
+              valueOf(row, "household_member_count"),
               valueOf(row, "planned_quantity"),
               valueOf(row, "actual_quantity"),
+              valueOf(row, "item_name") || "NFI item",
+              valueOf(row, "warehouse_name") || "Warehouse",
               <Badge value={valueOf(row, "delivery_status")} />,
+              (row.household_members as Entity[] | undefined)
+                ?.map((member) => member.full_name)
+                .filter(Boolean)
+                .join(", ") || "Not recorded",
               valueOf(row, "notes"),
             ])}
           />
@@ -6315,7 +6621,10 @@ function ReviewerNfiDeliveryPage({ role }: { role: Role }) {
   const [selectedId, setSelectedId] = useState("");
   const [status, setStatus] = useState("");
   const [error, setError] = useState("");
+  const [loading, setLoading] = useState(true);
   const load = async () => {
+    setLoading(true);
+    setError("");
     try {
       const [allocationResponse, issueResponse] = await Promise.all([
         api.list<Entity>("distribution-allocations"),
@@ -6329,6 +6638,8 @@ function ReviewerNfiDeliveryPage({ role }: { role: Role }) {
           ? reason.message
           : "Could not load reviewer delivery work.",
       );
+    } finally {
+      setLoading(false);
     }
   };
   useEffect(() => {
@@ -6383,7 +6694,7 @@ function ReviewerNfiDeliveryPage({ role }: { role: Role }) {
         <Panel title="NFI Delivery Review">
           <p className="section-lead">
             Review only allocated NFI entitlements pending a delivery result.
-            The selected allocation fixes the beneficiary, item, warehouse, and
+            The selected allocation fixes the household, item, warehouse, and
             planned quantity.
           </p>
         </Panel>
@@ -6397,10 +6708,11 @@ function ReviewerNfiDeliveryPage({ role }: { role: Role }) {
                 name="allocation"
                 options={pending.map((row) => ({
                   value: row.id,
-                  label: `${nfiBeneficiaryLabel(row)} - ${valueOf(row, "item_name") || "NFI item"} - planned ${valueOf(row, "allocated_quantity")}`,
+                  label: `${valueOf(row, "household_reference") || "Household"} — ${valueOf(row, "program_name") || "Program"} — ${valueOf(row, "item_name") || "NFI item"} — planned ${valueOf(row, "allocated_quantity")}`,
                 }))}
                 value={selectedId}
                 onChange={setSelectedId}
+                disabled={loading}
                 required
               />
               {selected && (
@@ -6408,6 +6720,37 @@ function ReviewerNfiDeliveryPage({ role }: { role: Role }) {
                   <div>
                     <strong>Entitlement:</strong>{" "}
                     {nfiEntitlementLabel(selected)}
+                  </div>
+                  <div>
+                    <strong>Program:</strong>{" "}
+                    {valueOf(selected, "program_name") || "Program"}
+                  </div>
+                  <div>
+                    <strong>Household:</strong>{" "}
+                    {valueOf(selected, "household_reference") || "Household"}
+                  </div>
+                  <div>
+                    <strong>Household size:</strong>{" "}
+                    {valueOf(selected, "household_size")}
+                  </div>
+                  <div>
+                    <strong>Member count:</strong>{" "}
+                    {valueOf(selected, "household_member_count")}
+                  </div>
+                  <div>
+                    <strong>Members:</strong>{" "}
+                    {(selected.household_members as Entity[] | undefined)
+                      ?.map((member) => member.full_name)
+                      .filter(Boolean)
+                      .join(", ") || "Not recorded"}
+                  </div>
+                  <div>
+                    <strong>Item:</strong>{" "}
+                    {valueOf(selected, "item_name") || "NFI item"}
+                  </div>
+                  <div>
+                    <strong>Warehouse:</strong>{" "}
+                    {valueOf(selected, "warehouse_name") || "Warehouse"}
                   </div>
                   <div>
                     <strong>Event:</strong> {distributionEventLabel(selected)}
@@ -6440,20 +6783,27 @@ function ReviewerNfiDeliveryPage({ role }: { role: Role }) {
                 required
               />
               <Textarea label="Reviewer note or evidence" name="notes" />
-              <button className="btn btn-primary" disabled={!selected}>
+              <button className="btn btn-primary" disabled={!selected || status === "saving"}>
                 Save delivery result
               </button>
             </form>
             <Message status={status} error={error} />
+            {!loading && pending.length === 0 && (
+              <p className="form-text">No pending distribution allocations are available.</p>
+            )}
           </Panel>
         </div>
       )}
       <div className={canWrite ? "col-xl-7" : "col-12"}>
         <Panel title="Delivery history">
           <Table
+            loading={loading}
             headings={[
               "Event",
-              "Beneficiary",
+              "Program",
+              "Household",
+              "Item",
+              "Warehouse",
               "Entitlement",
               "Planned",
               "Actual",
@@ -6462,7 +6812,10 @@ function ReviewerNfiDeliveryPage({ role }: { role: Role }) {
             ]}
             rows={issues.map((row) => [
               distributionEventLabel(row),
-              nfiBeneficiaryLabel(row),
+              valueOf(row, "program_name") || "Program",
+              valueOf(row, "household_reference") || "Household",
+              valueOf(row, "item_name") || "NFI item",
+              valueOf(row, "warehouse_name") || "Warehouse",
               nfiEntitlementLabel(row),
               valueOf(row, "planned_quantity"),
               valueOf(row, "actual_quantity"),
@@ -6471,6 +6824,7 @@ function ReviewerNfiDeliveryPage({ role }: { role: Role }) {
             ])}
           />
         </Panel>
+        {!canWrite && <Message status="" error={error} />}
       </div>
     </div>
   );
@@ -6526,9 +6880,9 @@ function App() {
     ) : route === "beneficiaries" ? (
       <Intake beneficiary role={role} />
     ) : route === "eligibility" ? (
-      <EligibilityPage />
+      <EligibilityPage role={role} />
     ) : route === "enrollment" ? (
-      <EnrollmentModalityPage />
+      <EnrollmentModalityPage role={role} />
     ) : route === "payments" ? (
       <PaymentsPage role={role} />
     ) : route === "pdm" ? (

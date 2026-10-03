@@ -121,7 +121,9 @@ def run_anomaly_detection(payment_batch):
 
 
 def verified_program_summary(program):
-    payments = PaymentInstruction.objects.filter(enrollment__program=program)
+    payments = PaymentInstruction.objects.filter(
+        Q(cash_entitlement__program=program) | Q(enrollment__program=program)
+    )
     enrollments = Enrollment.objects.filter(program=program)
     return {
         "beneficiaries": Beneficiary.objects.filter(household__program=program).count(),

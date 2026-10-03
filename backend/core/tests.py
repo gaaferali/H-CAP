@@ -15,10 +15,14 @@ from .models import (
     AutomationRule,
     Beneficiary,
     Complaint,
+    CashEntitlement,
     Enrollment,
     Household,
+    HouseholdEligibility,
+    HouseholdEnrollment,
     PDMResponse,
     PaymentChannelConfig,
+    PaymentBatch,
     PaymentEvent,
     PaymentInstruction,
     Budget,
@@ -28,6 +32,7 @@ from .models import (
     Warehouse,
     NFIItem,
     NFIEntitlement,
+    DistributionEvent,
     DistributionAllocation,
     DistributionIssue,
     Tenant,
@@ -370,6 +375,410 @@ class ProgramAccessTests(TestCase):
             format="json",
         )
         self.assertEqual(response.status_code, 400)
+
+
+class PaymentInstructionWorkflowTests(TestCase):
+    def setUp(self):
+        self.tenant = Tenant.objects.create(name="Payments Tenant", tenant_type="NGO", default_currency="USD")
+        self.manager = User.objects.create_user("payment-manager@example.test", "Payment Manager", self.tenant, "password", role=User.Role.MANAGER)
+        self.finance = User.objects.create_user("payment-finance@example.test", "Payment Finance", self.tenant, "password", role=User.Role.FINANCE)
+        self.reviewer = User.objects.create_user("payment-reviewer@example.test", "Payment Reviewer", self.tenant, "password", role=User.Role.REVIEWER)
+        self.program = Program.objects.create(
+            tenant=self.tenant,
+            name="Household payments",
+            country="Sudan",
+            currency="USD",
+            transfer_amount="50.00",
+            payment_cycle=Program.Cycle.ONE_TIME,
+            created_by=self.manager,
+        )
+        self.budget = Budget.objects.create(program=self.program, currency="USD", planned_total="500.00")
+        self.household = Household.objects.create(
+            tenant=self.tenant,
+            program=self.program,
+            household_size=2,
+            location="Khartoum",
+            registration_date=date.today(),
+            created_by=self.manager,
+        )
+        self.beneficiary = Beneficiary.objects.create(
+            household=self.household,
+            number="PAY-001",
+            full_name="Payment Beneficiary",
+            created_by=self.manager,
+        )
+        self.household_enrollment = HouseholdEnrollment.objects.create(
+            household=self.household,
+            program=self.program,
+            status=HouseholdEnrollment.Status.APPROVED,
+            assistance_modality=Enrollment.AssistanceModality.CASH,
+            decided_by=self.reviewer,
+        )
+        self.eligibility = HouseholdEligibility.objects.create(
+            household=self.household,
+            program=self.program,
+            status=HouseholdEligibility.Status.ELIGIBLE,
+            decided_by=self.reviewer,
+        )
+        self.entitlement = CashEntitlement.objects.create(
+            household=self.household,
+            beneficiary=self.beneficiary,
+            program=self.program,
+            amount="50.00",
+            currency="USD",
+            created_by=self.finance,
+        )
+        self.channel = PaymentChannelConfig.objects.create(
+            program=self.program,
+            channel_type=PaymentChannelConfig.ChannelType.MOBILE_MONEY,
+            provider_name="Payment simulator",
+            currency="USD",
+        )
+        self.other_program = Program.objects.create(
+            tenant=self.tenant,
+            name="Other payment program",
+            country="Sudan",
+            currency="USD",
+            transfer_amount="50.00",
+            payment_cycle=Program.Cycle.ONE_TIME,
+            created_by=self.manager,
+        )
+        self.other_channel = PaymentChannelConfig.objects.create(
+            program=self.other_program,
+            channel_type=PaymentChannelConfig.ChannelType.MOBILE_MONEY,
+            provider_name="Other simulator",
+            currency="USD",
+        )
+        self.client = APIClient()
+
+    def instruction_payload(self, **overrides):
+        payload = {
+            "cash_entitlement": str(self.entitlement.id),
+            "channel_config": str(self.channel.id),
+            "amount": "50.00",
+            "currency": "USD",
+        }
+        payload.update(overrides)
+        return payload
+
+    def test_new_instruction_uses_household_entitlement_and_exact_amount(self):
+        self.client.force_authenticate(self.finance)
+        response = self.client.post(
+            "/api/payment-instructions/",
+            self.instruction_payload(),
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 201, response.data)
+        instruction = PaymentInstruction.objects.get(pk=response.data["id"])
+        self.assertEqual(instruction.cash_entitlement, self.entitlement)
+        self.assertIsNone(instruction.enrollment)
+        self.assertEqual(instruction.beneficiary, self.beneficiary)
+        self.assertEqual(response.data["program_name"], self.program.name)
+        self.assertEqual(
+            response.data["household_reference"],
+            self.household.registration_reference or f"HH-{str(self.household.id).split('-')[0].upper()}",
+        )
+        self.assertEqual(response.data["household_member_count"], 1)
+        self.assertEqual(response.data["household_size"], 2)
+        self.assertEqual(response.data["household_members"][0]["full_name"], self.beneficiary.full_name)
+        duplicate = self.client.post(
+            "/api/payment-instructions/",
+            self.instruction_payload(),
+            format="json",
+        )
+        self.assertEqual(duplicate.status_code, 400, duplicate.data)
+
+    def test_payment_instruction_remains_household_level_without_beneficiary_assignment(self):
+        self.entitlement.beneficiary = None
+        self.entitlement.save(update_fields=["beneficiary"])
+        self.client.force_authenticate(self.finance)
+
+        response = self.client.post(
+            "/api/payment-instructions/",
+            self.instruction_payload(),
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 201, response.data)
+        instruction = PaymentInstruction.objects.get(pk=response.data["id"])
+        self.assertEqual(instruction.cash_entitlement, self.entitlement)
+        self.assertIsNone(instruction.beneficiary)
+        self.assertEqual(response.data["household_member_count"], 1)
+        self.assertEqual(response.data["household_members"][0]["full_name"], self.beneficiary.full_name)
+
+    def test_eligible_approved_cash_and_cash_nfi_households_can_create_payment_instructions(self):
+        self.program.nfi_enabled = True
+        self.program.save(update_fields=["nfi_enabled"])
+        cash_nfi_household = Household.objects.create(
+            tenant=self.tenant,
+            program=self.program,
+            household_size=4,
+            location="Omdurman",
+            registration_date=date.today(),
+            created_by=self.manager,
+        )
+        HouseholdEligibility.objects.create(
+            household=cash_nfi_household,
+            program=self.program,
+            status=HouseholdEligibility.Status.ELIGIBLE,
+            decided_by=self.reviewer,
+        )
+        HouseholdEnrollment.objects.create(
+            household=cash_nfi_household,
+            program=self.program,
+            status=HouseholdEnrollment.Status.APPROVED,
+            assistance_modality=Enrollment.AssistanceModality.CASH_NFI,
+            decided_by=self.reviewer,
+        )
+        self.client.force_authenticate(self.finance)
+
+        enrollment_list = self.client.get("/api/household-enrollments/")
+        self.assertEqual(enrollment_list.status_code, 200, enrollment_list.data)
+        eligible_rows = [
+            row
+            for row in enrollment_list.data["results"]
+            if str(row["household"]) in {
+                str(self.household.id),
+                str(cash_nfi_household.id),
+            }
+        ]
+        self.assertEqual(len(eligible_rows), 2)
+        self.assertTrue(all(row["eligibility_status"] == "ELIGIBLE" for row in eligible_rows))
+        self.assertTrue(all(row["status"] == "APPROVED" for row in eligible_rows))
+        self.assertEqual(
+            {row["assistance_modality"] for row in eligible_rows},
+            {"CASH", "CASH_NFI"},
+        )
+
+        created_instructions = []
+        for household in (self.household, cash_nfi_household):
+            response = self.client.post(
+                "/api/payment-instructions/",
+                {
+                    "household": str(household.id),
+                    "channel_config": str(self.channel.id),
+                    "amount": "50.00",
+                    "currency": "USD",
+                },
+                format="json",
+            )
+            self.assertEqual(response.status_code, 201, response.data)
+            instruction = PaymentInstruction.objects.get(pk=response.data["id"])
+            self.assertEqual(instruction.cash_entitlement.household, household)
+            self.assertIsNone(instruction.beneficiary)
+            self.assertIsNone(instruction.enrollment)
+            self.assertEqual(instruction.amount, Decimal("50.00"))
+            self.assertEqual(instruction.currency, self.program.currency)
+            created_instructions.append(instruction)
+        self.assertEqual(len(created_instructions), 2)
+        self.assertEqual(
+            CashEntitlement.objects.filter(
+                household=cash_nfi_household,
+                beneficiary__isnull=True,
+            ).count(),
+            1,
+        )
+
+    def test_instruction_rejects_legacy_only_wrong_amount_and_cross_program_channel(self):
+        self.client.force_authenticate(self.finance)
+        legacy = Enrollment.objects.create(
+            beneficiary=self.beneficiary,
+            household=self.household,
+            program=self.program,
+            eligibility_status=Enrollment.EligibilityStatus.ELIGIBLE,
+            status=Enrollment.Status.APPROVED,
+            assistance_modality=Enrollment.AssistanceModality.CASH,
+        )
+        legacy_only = self.client.post(
+            "/api/payment-instructions/",
+            {"enrollment": str(legacy.id), "beneficiary": str(self.beneficiary.id), "channel_config": str(self.channel.id), "amount": "50.00", "currency": "USD"},
+            format="json",
+        )
+        wrong_amount = self.client.post(
+            "/api/payment-instructions/",
+            self.instruction_payload(amount="49.99"),
+            format="json",
+        )
+        wrong_currency = self.client.post(
+            "/api/payment-instructions/",
+            self.instruction_payload(currency="EUR"),
+            format="json",
+        )
+        wrong_channel = self.client.post(
+            "/api/payment-instructions/",
+            self.instruction_payload(channel_config=str(self.other_channel.id)),
+            format="json",
+        )
+
+        self.assertEqual(legacy_only.status_code, 400, legacy_only.data)
+        self.assertEqual(wrong_amount.status_code, 400, wrong_amount.data)
+        self.assertEqual(wrong_currency.status_code, 400, wrong_currency.data)
+        self.assertEqual(wrong_channel.status_code, 400, wrong_channel.data)
+        self.assertEqual(PaymentInstruction.objects.count(), 0)
+
+    def test_batch_must_match_entitlement_program_and_tenant(self):
+        other_tenant = Tenant.objects.create(name="Other payments tenant", tenant_type="NGO", default_currency="USD")
+        other_manager = User.objects.create_user("other-payment-manager@example.test", "Other Manager", other_tenant, "password", role=User.Role.MANAGER)
+        foreign_program = Program.objects.create(
+            tenant=other_tenant,
+            name="Foreign payment program",
+            country="Chad",
+            currency="USD",
+            transfer_amount="50.00",
+            payment_cycle=Program.Cycle.ONE_TIME,
+            created_by=other_manager,
+        )
+        foreign_batch = PaymentBatch.objects.create(
+            tenant=other_tenant,
+            program=foreign_program,
+            name="Foreign batch",
+            idempotency_key="foreign-payment-batch",
+            created_by=other_manager,
+        )
+        self.client.force_authenticate(self.finance)
+
+        response = self.client.post(
+            "/api/payment-instructions/",
+            self.instruction_payload(batch=str(foreign_batch.id)),
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 400, response.data)
+        self.assertEqual(PaymentInstruction.objects.count(), 0)
+
+    def test_instruction_rejects_an_entitlement_from_another_tenant(self):
+        other_tenant = Tenant.objects.create(name="Foreign entitlement tenant", tenant_type="NGO", default_currency="USD")
+        other_manager = User.objects.create_user("foreign-payment-manager@example.test", "Foreign Manager", other_tenant, "password", role=User.Role.MANAGER)
+        foreign_program = Program.objects.create(
+            tenant=other_tenant,
+            name="Foreign payment program",
+            country="Chad",
+            currency="USD",
+            transfer_amount="50.00",
+            payment_cycle=Program.Cycle.ONE_TIME,
+            created_by=other_manager,
+        )
+        foreign_household = Household.objects.create(
+            tenant=other_tenant,
+            program=foreign_program,
+            household_size=1,
+            location="N'Djamena",
+            registration_date=date.today(),
+            created_by=other_manager,
+        )
+        HouseholdEnrollment.objects.create(
+            household=foreign_household,
+            program=foreign_program,
+            status=HouseholdEnrollment.Status.APPROVED,
+            assistance_modality=Enrollment.AssistanceModality.CASH,
+        )
+        foreign_entitlement = CashEntitlement.objects.create(
+            household=foreign_household,
+            program=foreign_program,
+            amount="50.00",
+            currency="USD",
+            created_by=other_manager,
+        )
+        foreign_channel = PaymentChannelConfig.objects.create(
+            program=foreign_program,
+            channel_type=PaymentChannelConfig.ChannelType.MOBILE_MONEY,
+            provider_name="Foreign simulator",
+            currency="USD",
+        )
+        self.client.force_authenticate(self.finance)
+
+        response = self.client.post(
+            "/api/payment-instructions/",
+            self.instruction_payload(
+                cash_entitlement=str(foreign_entitlement.id),
+                channel_config=str(foreign_channel.id),
+            ),
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 400, response.data)
+        self.assertEqual(PaymentInstruction.objects.count(), 0)
+
+    def test_reviewer_can_read_payments_but_cannot_create_or_change_them(self):
+        instruction = PaymentInstruction.objects.create(
+            cash_entitlement=self.entitlement,
+            beneficiary=self.beneficiary,
+            channel_config=self.channel,
+            amount="50.00",
+            currency="USD",
+            idempotency_key="existing-household-payment",
+            created_by=self.finance,
+        )
+        self.client.force_authenticate(self.reviewer)
+
+        listed = self.client.get("/api/payment-instructions/")
+        entitlements = self.client.get("/api/cash-entitlements/")
+        enrollments = self.client.get("/api/household-enrollments/")
+        create = self.client.post(
+            "/api/payment-instructions/",
+            self.instruction_payload(),
+            format="json",
+        )
+        update = self.client.patch(
+            f"/api/payment-instructions/{instruction.id}/",
+            {"amount": "1.00"},
+            format="json",
+        )
+
+        self.assertEqual(listed.status_code, 200, listed.data)
+        self.assertEqual(entitlements.status_code, 200, entitlements.data)
+        self.assertEqual(enrollments.status_code, 200, enrollments.data)
+        self.assertEqual(create.status_code, 403, create.data)
+        self.assertEqual(update.status_code, 403, update.data)
+
+    def test_finance_can_read_but_cannot_create_or_update_household_enrollment(self):
+        HouseholdEligibility.objects.create(
+            household=self.household,
+            program=self.program,
+            status=HouseholdEligibility.Status.ELIGIBLE,
+        )
+        pending_household = Household.objects.create(
+            tenant=self.tenant,
+            program=self.program,
+            household_size=1,
+            location="Pending enrollment",
+            registration_date=date.today(),
+            created_by=self.manager,
+        )
+        pending_enrollment = HouseholdEnrollment.objects.create(
+            household=pending_household,
+            program=self.program,
+            status=HouseholdEnrollment.Status.PENDING,
+            assistance_modality=Enrollment.AssistanceModality.CASH,
+        )
+        self.client.force_authenticate(self.finance)
+
+        enrollments = self.client.get("/api/household-enrollments/")
+        eligibility = self.client.get("/api/household-eligibility/")
+        nfi_entitlements = self.client.get("/api/nfi-entitlements/")
+        households = self.client.get("/api/households/")
+        beneficiaries = self.client.get("/api/beneficiaries/")
+        create_enrollment = self.client.post(
+            "/api/household-enrollments/",
+            {"household": str(self.household.id), "program": str(self.program.id), "status": "ENROLLED", "assistance_modality": "CASH"},
+            format="json",
+        )
+
+        self.assertEqual(enrollments.status_code, 200, enrollments.data)
+        self.assertIn(
+            str(self.household_enrollment.id),
+            [row["id"] for row in enrollments.data["results"]],
+        )
+        self.assertNotIn(
+            str(pending_enrollment.id),
+            [row["id"] for row in enrollments.data["results"]],
+        )
+        self.assertEqual(eligibility.status_code, 403, eligibility.data)
+        self.assertEqual(nfi_entitlements.status_code, 200, nfi_entitlements.data)
+        self.assertEqual(households.status_code, 200, households.data)
+        self.assertEqual(beneficiaries.status_code, 200, beneficiaries.data)
+        self.assertEqual(create_enrollment.status_code, 403, create_enrollment.data)
 
 
 class PDMAndAuthenticationTests(TestCase):
@@ -781,14 +1190,33 @@ class EndToEndWorkflowTests(TestCase):
             format="json",
         )
         self.assertEqual(approval_response.status_code, 200)
+        household = Household.objects.get(pk=household_response.data["id"])
+        HouseholdEligibility.objects.create(
+            household=household,
+            program=Program.objects.get(pk=program_id),
+            status=HouseholdEligibility.Status.ELIGIBLE,
+            decided_by=self.reviewer,
+        )
+        HouseholdEnrollment.objects.create(
+            household=household,
+            program=Program.objects.get(pk=program_id),
+            status=HouseholdEnrollment.Status.APPROVED,
+            assistance_modality=Enrollment.AssistanceModality.CASH,
+            decided_by=self.reviewer,
+        )
 
         self.authenticate(self.finance)
+        cash_entitlement_response = self.client.post(
+            "/api/cash-entitlements/",
+            {"household": str(household.id), "beneficiary": beneficiary_id, "program": program_id, "amount": "50.00", "currency": "USD"},
+            format="json",
+        )
+        self.assertEqual(cash_entitlement_response.status_code, 201, cash_entitlement_response.data)
         instruction_response = self.client.post(
             "/api/payment-instructions/",
             {
                 "batch": batch_response.data["id"],
-                "enrollment": enrollment_response.data["id"],
-                "beneficiary": beneficiary_id,
+                "cash_entitlement": cash_entitlement_response.data["id"],
                 "channel_config": channel_response.data["id"],
                 "amount": "50.00",
                 "currency": "USD",
@@ -1131,9 +1559,210 @@ class NFIWorkflowTests(TestCase):
         self.household = Household.objects.create(tenant=self.tenant, program=self.program, household_size=3, location="Khartoum", registration_date=date.today(), created_by=self.manager)
         self.beneficiary = Beneficiary.objects.create(household=self.household, number="NFI-001", full_name="NFI Beneficiary", created_by=self.manager)
         self.enrollment = Enrollment.objects.create(beneficiary=self.beneficiary, program=self.program, eligibility_status=Enrollment.EligibilityStatus.ELIGIBLE, status=Enrollment.Status.APPROVED, assistance_modality=Enrollment.AssistanceModality.NFI, approved_by=self.reviewer)
+        self.household_enrollment = HouseholdEnrollment.objects.create(
+            household=self.household,
+            program=self.program,
+            status=HouseholdEnrollment.Status.APPROVED,
+            assistance_modality=Enrollment.AssistanceModality.NFI,
+            decided_by=self.reviewer,
+        )
         self.warehouse = Warehouse.objects.create(program=self.program, name="Main warehouse", location="Khartoum", person_in_charge="Storekeeper", created_by=self.manager)
         self.item = NFIItem.objects.create(program=self.program, warehouse=self.warehouse, name="Food Kit", item_type="Food", unit="kit", initial_quantity=100, available_quantity=100, created_by=self.manager)
         self.client = APIClient()
+
+    def test_nfi_items_list_includes_committed_and_delivered_quantities(self):
+        self.client.force_authenticate(self.manager)
+
+        response = self.client.get("/api/nfi-items/")
+
+        self.assertEqual(response.status_code, 200, response.data)
+        item_data = next(row for row in response.data["results"] if row["id"] == str(self.item.id))
+        self.assertEqual(item_data["committed_quantity"], 0)
+        self.assertEqual(item_data["delivered_quantity"], 0)
+
+    def test_approved_nfi_and_cash_nfi_households_are_available_for_entitlement(self):
+        self.client.force_authenticate(self.finance)
+        for modality in (
+            Enrollment.AssistanceModality.NFI,
+            Enrollment.AssistanceModality.CASH_NFI,
+        ):
+            self.household_enrollment.assistance_modality = modality
+            self.household_enrollment.save(update_fields=["assistance_modality"])
+
+            enrollments = self.client.get("/api/household-enrollments/")
+            self.assertEqual(enrollments.status_code, 200, enrollments.data)
+            household_rows = [
+                row
+                for row in enrollments.data["results"]
+                if str(row["household"]) == str(self.household.id)
+            ]
+            self.assertTrue(household_rows, enrollments.data)
+            household_enrollment = household_rows[0]
+            self.assertEqual(str(household_enrollment["program"]), str(self.program.id))
+            self.assertEqual(household_enrollment["household_size"], 3)
+            self.assertEqual(household_enrollment["member_count"], 1)
+
+            response = self.client.post(
+                "/api/nfi-entitlements/",
+                {
+                    "household": str(self.household.id),
+                    "program": str(self.program.id),
+                    "warehouse": str(self.warehouse.id),
+                    "item": str(self.item.id),
+                    "quantity": 1,
+                },
+                format="json",
+            )
+            self.assertEqual(response.status_code, 201, response.data)
+            self.assertEqual(str(response.data["household"]), str(self.household.id))
+            self.assertEqual(response.data["household_members"][0]["full_name"], self.beneficiary.full_name)
+
+    def test_beneficiaries_cannot_exceed_household_size_or_lower_size_below_members(self):
+        self.client.force_authenticate(self.manager)
+        for national_id in ("NFI-002", "NFI-003"):
+            response = self.client.post(
+                "/api/beneficiaries/",
+                {
+                    "household": str(self.household.id),
+                    "national_id": national_id,
+                    "full_name": f"Member {national_id}",
+                },
+                format="json",
+            )
+            self.assertEqual(response.status_code, 201, response.data)
+
+        excess_member = self.client.post(
+            "/api/beneficiaries/",
+            {
+                "household": str(self.household.id),
+                "national_id": "NFI-004",
+                "full_name": "Over-limit member",
+            },
+            format="json",
+        )
+        reduce_size = self.client.patch(
+            f"/api/households/{self.household.id}/",
+            {"household_size": 2},
+            format="json",
+        )
+
+        self.assertEqual(excess_member.status_code, 400, excess_member.data)
+        self.assertIn("maximum 3", str(excess_member.data))
+        self.assertEqual(reduce_size.status_code, 400, reduce_size.data)
+        self.assertIn("3 beneficiaries", str(reduce_size.data))
+
+    def test_nfi_entitlement_cannot_exceed_available_stock(self):
+        self.client.force_authenticate(self.finance)
+
+        response = self.client.post(
+            "/api/nfi-entitlements/",
+            {
+                "household": str(self.household.id),
+                "program": str(self.program.id),
+                "warehouse": str(self.warehouse.id),
+                "item": str(self.item.id),
+                "quantity": 101,
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 400, response.data)
+        self.assertIn("Available: 100", str(response.data))
+        self.item.refresh_from_db()
+        self.assertEqual(self.item.available_quantity, 100)
+
+    def test_entitlement_edit_excludes_its_existing_reservation_from_available_stock(self):
+        self.client.force_authenticate(self.finance)
+        created = self.client.post(
+            "/api/nfi-entitlements/",
+            {
+                "household": str(self.household.id),
+                "program": str(self.program.id),
+                "warehouse": str(self.warehouse.id),
+                "item": str(self.item.id),
+                "quantity": 3,
+            },
+            format="json",
+        )
+        self.assertEqual(created.status_code, 201, created.data)
+
+        update = self.client.patch(
+            f"/api/nfi-entitlements/{created.data['id']}/",
+            {"quantity": 100},
+            format="json",
+        )
+        over_update = self.client.patch(
+            f"/api/nfi-entitlements/{created.data['id']}/",
+            {"quantity": 101},
+            format="json",
+        )
+
+        self.assertEqual(update.status_code, 200, update.data)
+        self.assertEqual(update.data["quantity"], 100)
+        self.assertEqual(over_update.status_code, 400, over_update.data)
+        self.item.refresh_from_db()
+        self.assertEqual(self.item.available_quantity, 0)
+
+    def test_distribution_event_cannot_reserve_more_than_warehouse_stock(self):
+        self.item.initial_quantity = 2
+        self.item.available_quantity = 2
+        self.item.save(update_fields=["initial_quantity", "available_quantity"])
+        entitlement = NFIEntitlement.objects.create(
+            household=self.household,
+            program=self.program,
+            item=self.item,
+            warehouse=self.warehouse,
+            quantity=3,
+            created_by=self.finance,
+        )
+        self.client.force_authenticate(self.manager)
+
+        response = self.client.post(
+            "/api/distribution-events/",
+            {
+                "program": str(self.program.id),
+                "warehouse": str(self.warehouse.id),
+                "event_date": str(date.today()),
+                "location": "Distribution point",
+                "distribution_team": "Team A",
+                "status": "PLANNED",
+                "entitlement_ids": [str(entitlement.id)],
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 400, response.data)
+        self.assertIn("Available: 2", str(response.data))
+        self.assertFalse(DistributionAllocation.objects.filter(entitlement=entitlement).exists())
+
+    def test_nfi_entitlement_rejects_household_from_another_program(self):
+        other_program = Program.objects.create(
+            name="Other NFI response",
+            tenant=self.tenant,
+            country="Sudan",
+            currency="USD",
+            transfer_amount="1.00",
+            payment_cycle=Program.Cycle.ONE_TIME,
+            cash_enabled=False,
+            nfi_enabled=True,
+            created_by=self.manager,
+        )
+        self.client.force_authenticate(self.finance)
+
+        response = self.client.post(
+            "/api/nfi-entitlements/",
+            {
+                "household": str(self.household.id),
+                "program": str(other_program.id),
+                "warehouse": str(self.warehouse.id),
+                "item": str(self.item.id),
+                "quantity": 1,
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 400, response.data)
+        self.assertIn("Household must be registered", str(response.data))
 
     def test_finance_reserves_once_event_uses_entitlement_and_reviewer_records_delivery(self):
         self.client.force_authenticate(self.finance)
@@ -1181,6 +1810,63 @@ class NFIWorkflowTests(TestCase):
         self.client.force_authenticate(self.finance)
         response = self.client.post("/api/payment-instructions/", {"enrollment": str(self.enrollment.id), "beneficiary": str(self.beneficiary.id), "channel_config": str(channel.id), "amount": "10.00", "currency": "USD"}, format="json")
         self.assertEqual(response.status_code, 400)
+
+    def test_separate_allocation_and_delivery_creation_paths_respect_reserved_quantities(self):
+        entitlement = NFIEntitlement.objects.create(
+            household=self.household,
+            beneficiary=self.beneficiary,
+            program=self.program,
+            item=self.item,
+            warehouse=self.warehouse,
+            quantity=3,
+            created_by=self.finance,
+        )
+        event = DistributionEvent.objects.create(
+            program=self.program,
+            warehouse=self.warehouse,
+            location="Distribution point",
+            event_date=date.today(),
+            distribution_team="Team A",
+            created_by=self.manager,
+        )
+        self.client.force_authenticate(self.manager)
+
+        allocation_response = self.client.post(
+            "/api/distribution-allocations/",
+            {"household": str(self.household.id), "beneficiary": str(self.beneficiary.id), "entitlement": str(entitlement.id), "event": str(event.id), "item": str(self.item.id), "planned_quantity": 3, "allocated_quantity": 3, "status": "ALLOCATED"},
+            format="json",
+        )
+        duplicate_allocation = self.client.post(
+            "/api/distribution-allocations/",
+            {"household": str(self.household.id), "beneficiary": str(self.beneficiary.id), "entitlement": str(entitlement.id), "event": str(event.id), "item": str(self.item.id), "planned_quantity": 1, "allocated_quantity": 1, "status": "ALLOCATED"},
+            format="json",
+        )
+        self.assertEqual(allocation_response.status_code, 201, allocation_response.data)
+        self.assertEqual(duplicate_allocation.status_code, 400, duplicate_allocation.data)
+
+        self.client.force_authenticate(self.reviewer)
+        delivery = self.client.post(
+            "/api/distribution-issues/",
+            {"household": str(self.household.id), "beneficiary": str(self.beneficiary.id), "entitlement": str(entitlement.id), "event": str(event.id), "item": str(self.item.id), "planned_quantity": 3, "actual_quantity": 2, "delivery_status": "PARTIALLY_RECEIVED"},
+            format="json",
+        )
+        over_delivery = self.client.post(
+            "/api/distribution-issues/",
+            {"household": str(self.household.id), "beneficiary": str(self.beneficiary.id), "entitlement": str(entitlement.id), "event": str(event.id), "item": str(self.item.id), "planned_quantity": 3, "actual_quantity": 2, "delivery_status": "PARTIALLY_RECEIVED"},
+            format="json",
+        )
+        corrected_delivery = self.client.patch(
+            f"/api/distribution-issues/{delivery.data['id']}/",
+            {"actual_quantity": 3, "delivery_status": "RECEIVED"},
+            format="json",
+        )
+
+        self.assertEqual(delivery.status_code, 201, delivery.data)
+        self.assertEqual(over_delivery.status_code, 400, over_delivery.data)
+        self.assertEqual(corrected_delivery.status_code, 200, corrected_delivery.data)
+        self.assertEqual(DistributionIssue.objects.filter(entitlement=entitlement).count(), 1)
+        entitlement.refresh_from_db()
+        self.assertEqual(entitlement.status, NFIEntitlement.Status.DISTRIBUTED)
 
     def test_reviewer_and_field_officer_cannot_create_nfi_entitlements(self):
         payload = {"beneficiary": str(self.beneficiary.id), "program": str(self.program.id), "warehouse": str(self.warehouse.id), "item": str(self.item.id), "quantity": 1}
