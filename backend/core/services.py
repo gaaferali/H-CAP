@@ -15,7 +15,149 @@ from .models import (
     ReconciliationItem,
     ReviewTask,
     SyncOperation,
+    AuditEvent,
 )
+
+
+
+
+# ---------------------------------------------------------------------------
+# Task 3 technical-control helpers (Amjad / Technical Lead)
+# ---------------------------------------------------------------------------
+
+TASK3_CASH_MAX = Decimal("160.00")
+TASK3_CASH_BASE = Decimal("100.00")
+TASK3_CASH_INCREMENT = Decimal("20.00")
+TASK3_CASH_FEE = Decimal("2.00")
+
+
+def calculate_cash_transfer_amount(household_size):
+    """Return the Task 3 CASH-R1 transfer amount from the household size."""
+    try:
+        size = int(household_size)
+    except (TypeError, ValueError):
+        raise ValueError("household_size must be an integer")
+    if size <= 0:
+        raise ValueError("household_size must be positive")
+    amount = TASK3_CASH_BASE + max(size - 4, 0) * TASK3_CASH_INCREMENT
+    return min(amount, TASK3_CASH_MAX)
+
+
+def is_task3_cash_program(program):
+    """Detect the synthetic CASH-R1 program without forcing a schema migration."""
+    config = getattr(program, "workflow_config", {}) or {}
+    module = str(config.get("module", "")).upper()
+    return module == "CASH" or "CASH-R1" in str(getattr(program, "name", "")).upper()
+
+
+@transaction.atomic
+def create_anomaly_review(*, tenant, program, entity_type, entity_id, reason, evidence, score="1.0000", confidence="0.9900"):
+    """Create an explainable anomaly signal and one human-review task, idempotently."""
+    signal, _ = _open_signal(
+        tenant=tenant, program=program, entity_type=entity_type, entity_id=entity_id,
+        signal_type="TASK3_ANOMALY", score=Decimal(str(score)), confidence=Decimal(str(confidence)),
+        reason=reason, evidence=evidence, model_version="task3-r1", rule_version="task3-r1",
+    )
+    task, _ = _open_review_task(
+        tenant=tenant, program=program, task_type=ReviewTask.TaskType.RISK_REVIEW,
+        entity_type=entity_type, entity_id=entity_id, priority=ReviewTask.Priority.HIGH,
+        resolution=f"Review anomaly signal {signal.id} before the operation is submitted.",
+    )
+    return signal, task
+
+
+def validate_task3_cash_amount(*, program, beneficiary, proposed_amount, entity_type="PAYMENT_INSTRUCTION", entity_id=""):
+    """Validate CASH-R1 formula and create an anomaly review for out-of-formula amounts."""
+    if not is_task3_cash_program(program):
+        return {"valid": True, "applies": False, "expected_amount": None}
+    try:
+        expected = calculate_cash_transfer_amount(beneficiary.household.household_size)
+    except ValueError as exc:
+        reason = f"Invalid household size: {exc}"
+        signal, task = create_anomaly_review(
+            tenant=program.tenant, program=program, entity_type=entity_type, entity_id=entity_id or beneficiary.id,
+            reason=reason, evidence={"household_id": str(beneficiary.household_id), "household_size": beneficiary.household.household_size},
+        )
+        return {"valid": False, "applies": True, "expected_amount": None, "reason": reason, "signal_id": str(signal.id), "review_task_id": str(task.id)}
+
+    amount = _safe_decimal(proposed_amount)
+    if amount != expected:
+        reason = f"Proposed CASH-R1 amount {amount:.2f} is outside the household-size formula; expected {expected:.2f}."
+        signal, task = create_anomaly_review(
+            tenant=program.tenant, program=program, entity_type=entity_type, entity_id=entity_id or beneficiary.id,
+            reason=reason, evidence={
+                "household_id": str(beneficiary.household_id),
+                "household_size": beneficiary.household.household_size,
+                "proposed_amount": str(amount),
+                "expected_amount": str(expected),
+                "cap": str(TASK3_CASH_MAX),
+            },
+        )
+        return {"valid": False, "applies": True, "expected_amount": expected, "reason": reason, "signal_id": str(signal.id), "review_task_id": str(task.id)}
+    return {"valid": True, "applies": True, "expected_amount": expected}
+
+
+@transaction.atomic
+def record_offline_event(*, tenant, operation_id, operation_type, payload, client_generated_id="", actor=None):
+    """Idempotent receipt for an offline event. Same payload is acknowledged; changed payload is rejected."""
+    import json
+    canonical = json.dumps(payload or {}, sort_keys=True, default=str, separators=(",", ":"))
+    request_hash = sha256(canonical.encode()).hexdigest()
+    existing = SyncOperation.objects.select_for_update().filter(tenant=tenant, operation_id=operation_id).first()
+    if existing:
+        if existing.request_hash != request_hash:
+            existing.status = SyncOperation.Status.REJECTED
+            existing.error_message = "Same operation_id was replayed with a different payload."
+            existing.processed_at = timezone.now()
+            existing.save(update_fields=["status", "error_message", "processed_at"])
+            if actor:
+                AuditEvent.objects.create(tenant=tenant, actor=actor, action="OFFLINE_REPLAY_REJECTED", entity_type="SYNC_OPERATION", entity_id=str(existing.id), after={"operation_id": operation_id, "reason": "payload_mismatch"})
+            return {"status": "conflict", "applied": False, "replay": False, "operation_id": operation_id}
+        if actor:
+            AuditEvent.objects.create(tenant=tenant, actor=actor, action="OFFLINE_REPLAY_ACKNOWLEDGED", entity_type="SYNC_OPERATION", entity_id=str(existing.id), after={"operation_id": operation_id, "status": existing.status})
+        return {"status": "duplicate", "applied": False, "replay": True, "operation_id": operation_id}
+
+    sync = SyncOperation.objects.create(
+        tenant=tenant, operation_id=operation_id, operation_type=operation_type,
+        client_generated_id=client_generated_id, request_hash=request_hash,
+        status=SyncOperation.Status.APPLIED, processed_at=timezone.now(),
+        validation_results={"offline_replay_safe": True},
+    )
+    if actor:
+        AuditEvent.objects.create(tenant=tenant, actor=actor, action="OFFLINE_EVENT_APPLIED", entity_type="SYNC_OPERATION", entity_id=str(sync.id), after={"operation_id": operation_id, "operation_type": operation_type})
+    return {"status": "applied", "applied": True, "replay": False, "operation_id": operation_id}
+
+
+def task3_cash_expected_summary(request_rows):
+    """Pure, reproducible CASH-R1 arithmetic for acceptance evidence; does not alter source decisions."""
+    eligible = []
+    holds = []
+    for row in request_rows:
+        size = row.get("size")
+        site = str(row.get("site", "")).upper()
+        consent = str(row.get("consent", "")).upper()
+        status = str(row.get("status", "")).upper()
+        household_id = str(row.get("household_id", "")).strip()
+        if not household_id or not isinstance(size, (int, float)) or size <= 0:
+            holds.append({"row_id": row.get("row_id"), "reason": "CORRECTION_HOLD"}); continue
+        if consent != "YES":
+            holds.append({"row_id": row.get("row_id"), "reason": "CONSENT_HOLD"}); continue
+        if site != "A":
+            holds.append({"row_id": row.get("row_id"), "reason": "SITE_HOLD"}); continue
+        if status != "APPROVED":
+            holds.append({"row_id": row.get("row_id"), "reason": "APPROVAL_HOLD"}); continue
+        eligible.append(row)
+
+    seen = set()
+    unique = []
+    for row in eligible:
+        hid = str(row["household_id"])
+        if hid in seen:
+            holds.append({"row_id": row.get("row_id"), "reason": "DUPLICATE_REVIEW", "household_id": hid}); continue
+        seen.add(hid); unique.append(row)
+    principal = sum((calculate_cash_transfer_amount(row["size"]) for row in unique), Decimal("0"))
+    fees = Decimal(len(unique)) * TASK3_CASH_FEE
+    return {"eligible_count": len(unique), "principal": str(principal), "fees": str(fees), "debit": str(principal + fees), "holds": holds}
 
 
 # ---------------------------------------------------------------------------

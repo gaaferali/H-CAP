@@ -19,7 +19,7 @@ from rest_framework.views import exception_handler
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
 from rest_framework import status
-from .services import (run_deduplication_check, run_automated_reconciliation, run_anomaly_detection, run_data_quality_check, validate_synced_registration, process_automation_event, AICopilotService)
+from .services import (run_deduplication_check, run_automated_reconciliation, run_anomaly_detection, run_data_quality_check, validate_synced_registration, process_automation_event, AICopilotService, record_offline_event)
 from .complaint_ai import analyze_complaint
 from .models import (
     AISignal,
@@ -233,29 +233,124 @@ class PaymentInstructionViewSet(RoleProtectedTenantViewSet):
     @action(detail=True, methods=["post"])
     @transaction.atomic
     def simulate(self, request, pk=None):
+        """Mock-provider state machine with Task 3 duplicate/timeout/retry controls."""
         instruction = self.get_object()
-        outcome = request.data.get("outcome")
+        outcome = str(request.data.get("outcome", "")).lower()
+        provider_tx = str(request.data.get("provider_transaction_id", "")).strip()
+
+        # Never allow a high-risk instruction to be sent to the provider simulation.
+        if outcome in {"submit", "success", "retry"}:
+            open_risk = AISignal.objects.filter(
+                tenant=request.user.tenant,
+                entity_type="PAYMENT_INSTRUCTION",
+                entity_id=str(instruction.id),
+                status=AISignal.Status.OPEN,
+                signal_type__in=["PAYMENT_ANOMALY", "TASK3_ANOMALY"],
+            ).exists()
+            if open_risk:
+                audit(request.user, "PAYMENT_PROVIDER_SUBMISSION_BLOCKED_ANOMALY", instruction,
+                      after={"outcome": outcome, "reason": "open_anomaly_review"})
+                raise ValidationError({"payment": "Provider submission blocked until the anomaly review is resolved."})
+
+        # CAS04: a duplicate settled callback must not create a second posting/event.
+        if outcome == "success" and instruction.status == PaymentInstruction.Status.SUCCESS:
+            if provider_tx and instruction.provider_reference and provider_tx == instruction.provider_reference:
+                audit(request.user, "PAYMENT_CALLBACK_DUPLICATE_ACKNOWLEDGED", instruction,
+                      after={"provider_transaction_id": provider_tx})
+                return Response({
+                    "status": "duplicate_callback",
+                    "instruction_id": str(instruction.id),
+                    "provider_reference": instruction.provider_reference,
+                    "double_posting": False,
+                })
+            raise ValidationError({"outcome": "Instruction is already settled; a different provider reference cannot settle it again."})
+
+        # Timeout is UNKNOWN at provider level and remains pending/submitted.
+        if outcome == "timeout":
+            if instruction.status not in {PaymentInstruction.Status.CREATED, PaymentInstruction.Status.SUBMITTED}:
+                raise ValidationError({"outcome": "Timeout can only occur before settlement."})
+            old_status = instruction.status
+            instruction.status = PaymentInstruction.Status.SUBMITTED
+            instruction.save(update_fields=["status"])
+            event = PaymentEvent.objects.create(
+                instruction=instruction,
+                event_type=PaymentEvent.EventType.EXCEPTION,
+                provider_status=PaymentEvent.ProviderStatus.UNKNOWN,
+                provider_transaction_id=provider_tx,
+                from_status=old_status,
+                to_status=instruction.status,
+                recorded_by=request.user,
+                redacted_payload={"simulation": True, "timeout": True, "retry_allowed": False},
+            )
+            audit(request.user, "PAYMENT_TIMEOUT_UNKNOWN", instruction,
+                  before={"status": old_status}, after={"status": instruction.status, "provider_status": "UNKNOWN"})
+            return Response({"status": "UNKNOWN", "pending": True, "retry_allowed": False, "event_id": str(event.id)})
+
+        # CAS03: failed payments are retried as a new linked attempt; the original
+        # failed instruction remains immutable history.
+        if outcome == "retry":
+            if instruction.status != PaymentInstruction.Status.FAILED:
+                raise ValidationError({"outcome": "Only a failed payment can be retried; pending/unknown payments must be reconciled first."})
+            retry = PaymentInstruction.objects.create(
+                batch=instruction.batch,
+                enrollment=instruction.enrollment,
+                beneficiary=instruction.beneficiary,
+                channel_config=instruction.channel_config,
+                amount=instruction.amount,
+                currency=instruction.currency,
+                status=PaymentInstruction.Status.SUBMITTED,
+                idempotency_key=f"retry:{instruction.id}:{uuid.uuid4()}",
+                created_by=request.user,
+            )
+            PaymentEvent.objects.create(
+                instruction=retry,
+                event_type=PaymentEvent.EventType.RETRY,
+                provider_status=PaymentEvent.ProviderStatus.ACCEPTED,
+                from_status=PaymentInstruction.Status.DRAFT,
+                to_status=PaymentInstruction.Status.SUBMITTED,
+                recorded_by=request.user,
+                redacted_payload={"simulation": True, "linked_failed_instruction": str(instruction.id)},
+            )
+            audit(request.user, "PAYMENT_RETRY_CREATED", retry,
+                  after={"linked_failed_instruction": str(instruction.id), "status": retry.status})
+            return Response({
+                "status": "retry_created",
+                "original_instruction_id": str(instruction.id),
+                "retry_instruction_id": str(retry.id),
+                "original_failure_retained": True,
+            }, status=status.HTTP_201_CREATED)
+
         transitions = {
             "submit": (PaymentInstruction.Status.SUBMITTED, PaymentEvent.EventType.SUBMITTED),
             "success": (PaymentInstruction.Status.SUCCESS, PaymentEvent.EventType.SUCCESS),
             "failure": (PaymentInstruction.Status.FAILED, PaymentEvent.EventType.FAILED),
-            "retry": (PaymentInstruction.Status.SUBMITTED, PaymentEvent.EventType.RETRY),
             "reversal": (PaymentInstruction.Status.REVERSED, PaymentEvent.EventType.REVERSED),
         }
         if outcome not in transitions:
-            raise ValidationError({"outcome": "Use submit, success, failure, retry, or reversal"})
+            raise ValidationError({"outcome": "Use submit, success, failure, timeout, retry, or reversal"})
+
         old_status = instruction.status
         new_status, event_type = transitions[outcome]
-        if new_status == PaymentInstruction.Status.REVERSED and old_status not in {PaymentInstruction.Status.SUCCESS, PaymentInstruction.Status.FAILED}:
-            raise ValidationError({"outcome": "Only success or failed instructions can be reversed"})
+        allowed = {
+            "submit": {PaymentInstruction.Status.CREATED},
+            "success": {PaymentInstruction.Status.SUBMITTED, PaymentInstruction.Status.CREATED},
+            "failure": {PaymentInstruction.Status.SUBMITTED, PaymentInstruction.Status.CREATED},
+            "reversal": {PaymentInstruction.Status.SUCCESS, PaymentInstruction.Status.FAILED},
+        }
+        if old_status not in allowed[outcome]:
+            raise ValidationError({"outcome": f"Invalid transition from {old_status} to {new_status}"})
+
         instruction.status = new_status
-        instruction.provider_reference = instruction.provider_reference or f"SIM-{str(instruction.id)[:8].upper()}"
+        if outcome == "success":
+            instruction.provider_reference = instruction.provider_reference or provider_tx or f"SIM-{str(instruction.id)[:8].upper()}"
+        elif provider_tx:
+            instruction.provider_reference = instruction.provider_reference or provider_tx
         instruction.save(update_fields=["status", "provider_reference"])
         event = PaymentEvent.objects.create(
             instruction=instruction,
             event_type=event_type,
-            provider_status=PaymentEvent.ProviderStatus.ACCEPTED if outcome in {"submit", "retry"} else PaymentEvent.ProviderStatus.SETTLED if outcome == "success" else PaymentEvent.ProviderStatus.FAILED,
-            provider_transaction_id=request.data.get("provider_transaction_id", ""),
+            provider_status=PaymentEvent.ProviderStatus.ACCEPTED if outcome == "submit" else PaymentEvent.ProviderStatus.SETTLED if outcome == "success" else PaymentEvent.ProviderStatus.FAILED,
+            provider_transaction_id=provider_tx,
             from_status=old_status,
             to_status=new_status,
             recorded_by=request.user,
@@ -296,6 +391,10 @@ class AISignalViewSet(TenantScopedModelViewSet):
 
     @action(detail=True, methods=["post"])
     def review(self, request, pk=None):
+        if request.user.role not in {User.Role.ADMIN, User.Role.REVIEWER, User.Role.MANAGER}:
+            signal = self.get_object()
+            audit(request.user, "AI_SIGNAL_REVIEW_DENIED", signal, after={"attempted_status": request.data.get("status")})
+            raise PermissionDenied("Only an authorized independent reviewer can approve AI signals")
         signal = self.get_object()
         signal.status = request.data.get("status", AISignal.Status.REVIEWED)
         signal.review_note = request.data.get("review_note", "")
@@ -590,6 +689,29 @@ def registration_sync_view(request):
     validation_results = validate_synced_registration(sync, household, synced)
     audit(request.user, "OFFLINE_REGISTRATION_SYNCED", household, after={"operation_id": operation_id, "client_generated_id": client_generated_id, "beneficiaries_count": len(synced), "sync_status": sync.status})
     return Response({"status": "synchronized", "operation_id": operation_id, "sync_status": sync.status, "household_id": str(household.id), "household_created": household_created, "beneficiaries_processed": len(synced), "client_generated_id": client_generated_id, "validation_results": validation_results, "tenant_isolated": True}, status=status.HTTP_201_CREATED if household_created else status.HTTP_200_OK)
+
+
+@api_view(["POST"])
+def offline_event_api(request):
+    """Generic Task 3 offline replay receipt for integration tests X02."""
+    if request.user.role not in {User.Role.ADMIN, User.Role.FIELD_OFFICER, User.Role.MANAGER}:
+        audit(request.user, "OFFLINE_EVENT_DENIED", request.user, after={"reason": "role"})
+        raise PermissionDenied("Your role cannot submit offline events")
+    operation_id = str(request.data.get("operation_id", "")).strip()
+    operation_type = str(request.data.get("operation_type", "GENERIC_OFFLINE_EVENT")).strip()
+    payload = request.data.get("payload", {})
+    if not operation_id:
+        raise ValidationError({"operation_id": "Required"})
+    if not isinstance(payload, dict):
+        raise ValidationError({"payload": "Must be an object"})
+    return Response(record_offline_event(
+        tenant=request.user.tenant,
+        operation_id=operation_id,
+        operation_type=operation_type,
+        payload=payload,
+        client_generated_id=str(request.data.get("client_generated_id", "")),
+        actor=request.user,
+    ))
 
 
 @api_view(["GET", "POST"])

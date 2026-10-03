@@ -2,6 +2,8 @@ from django.contrib.auth import authenticate
 from django.utils import timezone
 from rest_framework import serializers
 
+from .services import validate_task3_cash_amount
+
 from .models import (
     AISignal,
     AuditEvent,
@@ -146,6 +148,22 @@ class PaymentInstructionSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError("Channel must belong to the enrollment program")
         if enrollment.program.tenant.pk != self.context["request"].user.tenant.pk:
             raise serializers.ValidationError("Enrollment belongs to another tenant")
+
+        # Task 3 CASH-R1 safety control: reject out-of-formula amounts before
+        # any simulated/provider submission can occur. The anomaly signal and
+        # human review task are created by the service for evidence.
+        cash_check = validate_task3_cash_amount(
+            program=enrollment.program,
+            beneficiary=beneficiary,
+            proposed_amount=attrs["amount"],
+            entity_id=str(beneficiary.id),
+        )
+        if not cash_check["valid"]:
+            raise serializers.ValidationError({
+                "amount": cash_check["reason"],
+                "anomaly_signal_id": cash_check.get("signal_id"),
+                "review_task_id": cash_check.get("review_task_id"),
+            })
         return attrs
 
 
