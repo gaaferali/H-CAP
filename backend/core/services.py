@@ -27,7 +27,7 @@ def run_deduplication_check(beneficiary):
         household__program=beneficiary.household.program
     ).exclude(id=beneficiary.id).filter(
         Q(national_id_hash=beneficiary.national_id_hash) |
-        Q(phone_last4=beneficiary.phone_last4)
+        Q(phone_number__endswith=(beneficiary.phone_number or "")[-4:])
     )
 
     matches = list(duplicates)

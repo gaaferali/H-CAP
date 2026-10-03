@@ -1137,7 +1137,7 @@ class NFIWorkflowTests(TestCase):
 
     def test_finance_reserves_once_event_uses_entitlement_and_reviewer_records_delivery(self):
         self.client.force_authenticate(self.finance)
-        entitlement_response = self.client.post("/api/nfi-entitlements/", {"beneficiary": str(self.beneficiary.id), "program": str(self.program.id), "warehouse": str(self.warehouse.id), "item": str(self.item.id), "quantity": 3}, format="json")
+        entitlement_response = self.client.post("/api/nfi-entitlements/", {"household": str(self.household.id), "beneficiary": str(self.beneficiary.id), "program": str(self.program.id), "warehouse": str(self.warehouse.id), "item": str(self.item.id), "quantity": 3}, format="json")
         self.assertEqual(entitlement_response.status_code, 201, entitlement_response.data)
         self.assertEqual(entitlement_response.data["program_name"], self.program.name)
         self.assertEqual(entitlement_response.data["beneficiary_name"], self.beneficiary.full_name)
@@ -1145,6 +1145,7 @@ class NFIWorkflowTests(TestCase):
         self.assertNotEqual(entitlement_response.data["national_id_reference"], str(self.beneficiary.id))
         self.assertEqual(entitlement_response.data["item_name"], self.item.name)
         self.assertEqual(entitlement_response.data["warehouse_name"], self.warehouse.name)
+        self.assertEqual(entitlement_response.data["household_reference"], self.household.registration_reference or f"HH-{str(self.household.id).split('-')[0].upper()}")
         entitlement = NFIEntitlement.objects.get(id=entitlement_response.data["id"])
         self.item.refresh_from_db()
         self.assertEqual(self.item.available_quantity, 97)

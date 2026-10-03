@@ -66,9 +66,9 @@ class DuplicateDetector:
 
         # 2. Phone last 4 digits
         if (
-            beneficiary.phone_last4
-            and candidate.phone_last4
-            and beneficiary.phone_last4 == candidate.phone_last4
+            beneficiary.phone_number
+            and candidate.phone_number
+            and beneficiary.phone_number[-4:] == candidate.phone_number[-4:]
         ):
             factors.append("same_phone_last4")
             scores.append(("phone", 1.0))

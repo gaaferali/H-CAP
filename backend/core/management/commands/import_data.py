@@ -77,7 +77,7 @@ class Command(BaseCommand):
             for row in normalized_rows:
                 household, household_created = Household.objects.get_or_create(
                     tenant=tenant,
-                    client_generated_id=row["client_generated_id"],
+                    registration_reference=row["client_generated_id"],
                     defaults={
                         "program": program,
                         "household_size": row["household_size"],
@@ -95,7 +95,6 @@ class Command(BaseCommand):
                         "full_name": row["full_name"],
                         "gender": row["gender"],
                         "phone_number": row["phone_number"],
-                        "phone_last4": row["phone_last4"],
                         "national_id_hash": row["national_id_hash"],
                         "consent_given": row["consent_given"],
                         "created_by": user,

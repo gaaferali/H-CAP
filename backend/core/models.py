@@ -124,18 +124,32 @@ class Household(models.Model):
     household_size = models.PositiveIntegerField()
     location = models.CharField(max_length=255)
     registration_date = models.DateField()
-    client_generated_id = models.CharField(max_length=120, blank=True)
+    registration_reference = models.CharField(max_length=120, blank=True)
     created_by = models.ForeignKey(User, on_delete=models.PROTECT, related_name="created_households")
     created_at = models.DateTimeField(default=django_timezone.now)
+
+    def __init__(self, *args, **kwargs):
+        if "client_generated_id" in kwargs and "registration_reference" not in kwargs:
+            kwargs["registration_reference"] = kwargs.pop("client_generated_id")
+        super().__init__(*args, **kwargs)
 
     class Meta:
         constraints = [
             models.UniqueConstraint(
-                fields=["tenant", "client_generated_id"],
-                condition=~models.Q(client_generated_id=""),
-                name="unique_household_client_id_per_tenant",
+                fields=["tenant", "registration_reference"],
+                condition=~models.Q(registration_reference=""),
+                name="unique_household_registration_reference_per_tenant",
             )
         ]
+
+    @property
+    def client_generated_id(self):
+        """Legacy read alias; registration_reference is authoritative."""
+        return self.registration_reference
+
+    @client_generated_id.setter
+    def client_generated_id(self, value):
+        self.registration_reference = value or ""
 
 
 class Beneficiary(models.Model):
@@ -157,7 +171,6 @@ class Beneficiary(models.Model):
     gender = models.CharField(max_length=40, blank=True)
     date_of_birth = models.DateField(null=True, blank=True)
     phone_number = models.CharField(max_length=30, blank=True)
-    phone_last4 = models.CharField(max_length=4, blank=True)
     national_id_hash = models.CharField(max_length=255, blank=True)
     consent_given = models.BooleanField(default=False)
     verification_status = models.CharField(max_length=20, choices=VerificationStatus.choices, default=VerificationStatus.PENDING)
@@ -165,8 +178,18 @@ class Beneficiary(models.Model):
     created_by = models.ForeignKey(User, on_delete=models.PROTECT, related_name="created_beneficiaries")
     created_at = models.DateTimeField(default=django_timezone.now)
 
+    def __init__(self, *args, **kwargs):
+        legacy_phone_last4 = kwargs.pop("phone_last4", None)
+        super().__init__(*args, **kwargs)
+        if legacy_phone_last4 and not self.phone_number:
+            self.phone_number = str(legacy_phone_last4)
+
     class Meta:
         constraints = [models.UniqueConstraint(fields=["household", "number"], name="unique_beneficiary_number_per_household")]
+
+    @property
+    def phone_last4(self):
+        return (self.phone_number or "")[-4:]
 
 
 class Enrollment(models.Model):
@@ -187,7 +210,8 @@ class Enrollment(models.Model):
         SUSPENDED = "SUSPENDED", "Suspended"
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    beneficiary = models.ForeignKey(Beneficiary, on_delete=models.PROTECT, related_name="enrollments")
+    household = models.ForeignKey(Household, on_delete=models.PROTECT, related_name="legacy_enrollments", null=True, blank=True)
+    beneficiary = models.ForeignKey(Beneficiary, on_delete=models.PROTECT, related_name="enrollments", null=True, blank=True)
     program = models.ForeignKey(Program, on_delete=models.PROTECT, related_name="enrollments")
     eligibility_status = models.CharField(max_length=20, choices=EligibilityStatus.choices, default=EligibilityStatus.PENDING)
     status = models.CharField(max_length=20, choices=Status.choices, default=Status.ENROLLED)
@@ -299,7 +323,6 @@ class Complaint(models.Model):
     resolved_at = models.DateTimeField(null=True, blank=True)
     created_by = models.ForeignKey(User, on_delete=models.PROTECT, related_name="created_complaints")
     created_at = models.DateTimeField(default=django_timezone.now)
-
 
 class ComplaintAIAnalysis(models.Model):
     class ReviewDecision(models.TextChoices):
@@ -592,12 +615,16 @@ class HouseholdEligibility(models.Model):
 class HouseholdEnrollment(models.Model):
     class Status(models.TextChoices):
         PENDING = "PENDING", "Pending"
+        ENROLLED = "ENROLLED", "Enrolled"
         ACCEPTED = "ACCEPTED", "Accepted"
+        APPROVED = "APPROVED", "Approved"
         REJECTED = "REJECTED", "Rejected"
+        SUSPENDED = "SUSPENDED", "Suspended"
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     household = models.ForeignKey(Household, on_delete=models.PROTECT, related_name="household_enrollments")
     program = models.ForeignKey(Program, on_delete=models.PROTECT, related_name="household_enrollments")
     status = models.CharField(max_length=20, choices=Status.choices, default=Status.PENDING)
+    assistance_modality = models.CharField(max_length=12, choices=Enrollment.AssistanceModality.choices, default=Enrollment.AssistanceModality.CASH)
     note = models.TextField(blank=True)
     decided_by = models.ForeignKey(User, on_delete=models.PROTECT, null=True, blank=True, related_name="household_enrollment_decisions")
     decided_at = models.DateTimeField(null=True, blank=True)
@@ -610,7 +637,8 @@ class CashEntitlement(models.Model):
         PAID = "PAID", "Paid"
         CANCELLED = "CANCELLED", "Cancelled"
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    beneficiary = models.ForeignKey(Beneficiary, on_delete=models.PROTECT, related_name="cash_entitlements")
+    household = models.ForeignKey(Household, on_delete=models.PROTECT, related_name="cash_entitlements", null=True, blank=True)
+    beneficiary = models.ForeignKey(Beneficiary, on_delete=models.PROTECT, related_name="cash_entitlements", null=True, blank=True)
     program = models.ForeignKey(Program, on_delete=models.PROTECT, related_name="cash_entitlements")
     amount = models.DecimalField(max_digits=18, decimal_places=2, validators=[MinValueValidator(0.01)])
     currency = models.CharField(max_length=3)
@@ -658,7 +686,8 @@ class NFIEntitlement(models.Model):
         DISTRIBUTED = "DISTRIBUTED", "Distributed"
         CANCELLED = "CANCELLED", "Cancelled"
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    beneficiary = models.ForeignKey(Beneficiary, on_delete=models.PROTECT, related_name="nfi_entitlements")
+    household = models.ForeignKey(Household, on_delete=models.PROTECT, related_name="nfi_entitlements", null=True, blank=True)
+    beneficiary = models.ForeignKey(Beneficiary, on_delete=models.PROTECT, related_name="nfi_entitlements", null=True, blank=True)
     program = models.ForeignKey(Program, on_delete=models.PROTECT, related_name="nfi_entitlements")
     item = models.ForeignKey(NFIItem, on_delete=models.PROTECT, related_name="entitlements")
     warehouse = models.ForeignKey(Warehouse, on_delete=models.PROTECT, related_name="nfi_entitlements", null=True, blank=True)
@@ -714,7 +743,8 @@ class DistributionEvent(models.Model):
 
 class DistributionAllocation(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    beneficiary = models.ForeignKey(Beneficiary, on_delete=models.PROTECT, related_name="distribution_allocations")
+    household = models.ForeignKey(Household, on_delete=models.PROTECT, related_name="distribution_allocations", null=True, blank=True)
+    beneficiary = models.ForeignKey(Beneficiary, on_delete=models.PROTECT, related_name="distribution_allocations", null=True, blank=True)
     entitlement = models.ForeignKey(NFIEntitlement, on_delete=models.PROTECT, related_name="allocations")
     event = models.ForeignKey(DistributionEvent, on_delete=models.PROTECT, related_name="allocations")
     item = models.ForeignKey(NFIItem, on_delete=models.PROTECT, related_name="allocations")
@@ -736,7 +766,8 @@ class DistributionIssue(models.Model):
         LOST = "LOST", "Lost"
         RESCHEDULED = "RESCHEDULED", "Rescheduled"
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    beneficiary = models.ForeignKey(Beneficiary, on_delete=models.PROTECT, related_name="distribution_issues")
+    household = models.ForeignKey(Household, on_delete=models.PROTECT, related_name="distribution_issues", null=True, blank=True)
+    beneficiary = models.ForeignKey(Beneficiary, on_delete=models.PROTECT, related_name="distribution_issues", null=True, blank=True)
     entitlement = models.ForeignKey(NFIEntitlement, on_delete=models.PROTECT, related_name="issues")
     item = models.ForeignKey(NFIItem, on_delete=models.PROTECT, related_name="issues")
     event = models.ForeignKey(DistributionEvent, on_delete=models.PROTECT, related_name="issues")

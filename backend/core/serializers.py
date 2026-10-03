@@ -1,7 +1,7 @@
 from django.contrib.auth import authenticate
 from django.utils import timezone
 from django.utils.crypto import salted_hmac
-from django.db.models import Sum
+from django.db.models import Q, Sum
 from rest_framework import serializers
 import re
 from decimal import Decimal
@@ -62,6 +62,34 @@ def safe_beneficiary_reference(beneficiary):
 
 def national_id_reference(national_id):
     return f"NID-{national_id_digest(national_id).upper()}"
+
+
+def household_reference(household):
+    if not household:
+        return "Not recorded"
+    return household.registration_reference or f"HH-{str(household.id).split('-')[0].upper()}"
+
+
+def household_member_count(household):
+    return household.beneficiaries.count() if household else 0
+
+
+def approved_household_modality(household, program, modality):
+    if not household or household.program_id != program.id:
+        return False
+    if HouseholdEnrollment.objects.filter(
+        household=household,
+        program=program,
+        status__in=[HouseholdEnrollment.Status.ACCEPTED, HouseholdEnrollment.Status.APPROVED],
+        assistance_modality__in=modality,
+    ).exists():
+        return True
+    return Enrollment.objects.filter(
+        Q(household=household) | Q(household__isnull=True, beneficiary__household=household),
+        program=program,
+        status=Enrollment.Status.APPROVED,
+        assistance_modality__in=modality,
+    ).exists()
 
 
 class TenantSerializer(serializers.ModelSerializer):
@@ -142,12 +170,21 @@ class ProgramSerializer(serializers.ModelSerializer):
 
 class HouseholdEligibilitySerializer(serializers.ModelSerializer):
     beneficiaries = serializers.SerializerMethodField()
+    household_reference = serializers.SerializerMethodField()
+    member_count = serializers.SerializerMethodField()
+    program_name = serializers.CharField(source="program.name", read_only=True)
     class Meta:
         model = HouseholdEligibility
         fields = "__all__"
         read_only_fields = ["decided_by", "decided_at", "created_at"]
     def get_beneficiaries(self, obj):
         return list(obj.household.beneficiaries.values("id", "full_name", "number", "status"))
+
+    def get_household_reference(self, obj):
+        return household_reference(obj.household)
+
+    def get_member_count(self, obj):
+        return household_member_count(obj.household)
 
     def validate(self, attrs):
         household = attrs.get("household") or self.instance.household
@@ -161,6 +198,9 @@ class HouseholdEligibilitySerializer(serializers.ModelSerializer):
 
 
 class HouseholdEnrollmentSerializer(serializers.ModelSerializer):
+    household_reference = serializers.SerializerMethodField()
+    member_count = serializers.SerializerMethodField()
+    program_name = serializers.CharField(source="program.name", read_only=True)
     class Meta:
         model = HouseholdEnrollment
         fields = "__all__"
@@ -174,28 +214,70 @@ class HouseholdEnrollmentSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError({"program": "Program must match the household program"})
         if not user.is_superuser and program.tenant_id != user.tenant_id:
             raise serializers.ValidationError("Program belongs to another tenant")
+        submitted_modality = self.initial_data.get("assistance_modality") if self.initial_data is not None else None
+        modality = attrs.get("assistance_modality", self.instance.assistance_modality if self.instance else None)
+        if not submitted_modality and not self.instance and program.nfi_enabled and not program.cash_enabled:
+            modality = Enrollment.AssistanceModality.NFI
+            attrs["assistance_modality"] = modality
+        if modality == Enrollment.AssistanceModality.CASH and not program.cash_enabled:
+            raise serializers.ValidationError({"assistance_modality": "Payment is disabled for this program"})
+        if modality == Enrollment.AssistanceModality.NFI and not program.nfi_enabled:
+            raise serializers.ValidationError({"assistance_modality": "NFI is disabled for this program"})
+        if modality == Enrollment.AssistanceModality.CASH_NFI and not (program.cash_enabled and program.nfi_enabled):
+            raise serializers.ValidationError({"assistance_modality": "Payment + NFI requires both modalities to be enabled"})
         return attrs
+
+    def get_household_reference(self, obj):
+        return household_reference(obj.household)
+
+    def get_member_count(self, obj):
+        return household_member_count(obj.household)
 
 
 class CashEntitlementSerializer(serializers.ModelSerializer):
+    household_reference = serializers.SerializerMethodField()
+    household_member_count = serializers.SerializerMethodField()
+    program_name = serializers.CharField(source="program.name", read_only=True)
+    budget_total = serializers.SerializerMethodField()
+    budget_committed = serializers.SerializerMethodField()
+    budget_remaining = serializers.SerializerMethodField()
     class Meta:
         model = CashEntitlement
         fields = "__all__"
         read_only_fields = ["created_by", "created_at", "updated_at"]
 
     def validate(self, attrs):
-        beneficiary = attrs.get("beneficiary") or self.instance.beneficiary
-        program = attrs.get("program") or self.instance.program
+        beneficiary = attrs.get("beneficiary") or getattr(self.instance, "beneficiary", None)
+        household = attrs.get("household") or getattr(self.instance, "household", None) or getattr(beneficiary, "household", None)
+        program = attrs.get("program") or getattr(self.instance, "program", None)
         user = self.context["request"].user
-        if beneficiary.household.program_id != program.id:
-            raise serializers.ValidationError({"program": "Program must match the beneficiary household program"})
+        if not household or household.program_id != program.id:
+            raise serializers.ValidationError({"household": "Household must be registered in the selected program"})
+        if beneficiary and beneficiary.household_id != household.id:
+            raise serializers.ValidationError({"beneficiary": "Member must belong to the selected household"})
         if not user.is_superuser and program.tenant_id != user.tenant_id:
             raise serializers.ValidationError("Program belongs to another tenant")
         if not program.cash_enabled:
             raise serializers.ValidationError({"program": "Cash assistance is disabled for this program"})
-        if not Enrollment.objects.filter(beneficiary=beneficiary, program=program, status=Enrollment.Status.APPROVED, assistance_modality__in=[Enrollment.AssistanceModality.CASH, Enrollment.AssistanceModality.CASH_NFI]).exists():
-            raise serializers.ValidationError({"beneficiary": "Beneficiary is not approved for cash assistance"})
+        if not approved_household_modality(household, program, [Enrollment.AssistanceModality.CASH, Enrollment.AssistanceModality.CASH_NFI]):
+            raise serializers.ValidationError({"household": "Household is not approved for cash assistance"})
+        attrs["household"] = household
         return attrs
+
+    def get_household_reference(self, obj):
+        return household_reference(obj.household or getattr(obj.beneficiary, "household", None))
+
+    def get_household_member_count(self, obj):
+        return household_member_count(obj.household or getattr(obj.beneficiary, "household", None))
+
+    def get_budget_total(self, obj):
+        return getattr(getattr(obj.program, "budget", None), "planned_total", 0)
+
+    def get_budget_committed(self, obj):
+        return CashEntitlement.objects.filter(program=obj.program, status__in=[CashEntitlement.Status.ACTIVE, CashEntitlement.Status.PAID]).aggregate(total=Sum("amount"))["total"] or 0
+
+    def get_budget_remaining(self, obj):
+        return (self.get_budget_total(obj) or 0) - (self.get_budget_committed(obj) or 0)
 
 
 class WarehouseSerializer(serializers.ModelSerializer):
@@ -206,6 +288,10 @@ class WarehouseSerializer(serializers.ModelSerializer):
 
 
 class NFIItemSerializer(serializers.ModelSerializer):
+    program_name = serializers.CharField(source="program.name", read_only=True)
+    warehouse_name = serializers.CharField(source="warehouse.name", read_only=True)
+    committed_quantity = serializers.SerializerMethodField()
+    delivered_quantity = serializers.SerializerMethodField()
     class Meta:
         model = NFIItem
         fields = "__all__"
@@ -213,6 +299,8 @@ class NFIItemSerializer(serializers.ModelSerializer):
 
 
 class NFIEntitlementSerializer(serializers.ModelSerializer):
+    household_reference = serializers.SerializerMethodField()
+    household_member_count = serializers.SerializerMethodField()
     program_name = serializers.CharField(source="program.name", read_only=True)
     beneficiary_name = serializers.CharField(source="beneficiary.full_name", read_only=True)
     national_id_reference = serializers.SerializerMethodField()
@@ -225,16 +313,19 @@ class NFIEntitlementSerializer(serializers.ModelSerializer):
         read_only_fields = ["created_by", "created_at", "updated_at"]
 
     def get_national_id_reference(self, entitlement):
-        return safe_beneficiary_reference(entitlement.beneficiary)
+        return safe_beneficiary_reference(entitlement.beneficiary) if entitlement.beneficiary else "Not recorded"
 
     def validate(self, attrs):
-        beneficiary = attrs.get("beneficiary") or self.instance.beneficiary
-        program = attrs.get("program") or self.instance.program
+        beneficiary = attrs.get("beneficiary") or getattr(self.instance, "beneficiary", None)
+        household = attrs.get("household") or getattr(self.instance, "household", None) or getattr(beneficiary, "household", None)
+        program = attrs.get("program") or getattr(self.instance, "program", None)
         item = attrs.get("item") or self.instance.item
         warehouse = attrs.get("warehouse", self.instance.warehouse if self.instance else None)
         user = self.context["request"].user
-        if beneficiary.household.program_id != program.id:
-            raise serializers.ValidationError({"program": "Program must match the beneficiary household program"})
+        if not household or household.program_id != program.id:
+            raise serializers.ValidationError({"household": "Household must be registered in the selected program"})
+        if beneficiary and beneficiary.household_id != household.id:
+            raise serializers.ValidationError({"beneficiary": "Member must belong to the selected household"})
         if not warehouse:
             raise serializers.ValidationError({"warehouse": "Warehouse is required for NFI entitlement"})
         if item.program_id != program.id or warehouse.program_id != program.id or item.warehouse_id != warehouse.id:
@@ -245,11 +336,18 @@ class NFIEntitlementSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError({"quantity": "NFI entitlement quantity must be greater than zero"})
         if not item.active or item.available_quantity < 1:
             raise serializers.ValidationError({"item": "Item is inactive or has no available stock"})
-        if not Enrollment.objects.filter(beneficiary=beneficiary, program=program, status=Enrollment.Status.APPROVED, assistance_modality__in=[Enrollment.AssistanceModality.NFI, Enrollment.AssistanceModality.CASH_NFI]).exists():
-            raise serializers.ValidationError({"beneficiary": "Beneficiary is not approved for NFI assistance"})
+        if not approved_household_modality(household, program, [Enrollment.AssistanceModality.NFI, Enrollment.AssistanceModality.CASH_NFI]):
+            raise serializers.ValidationError({"household": "Household is not approved for NFI assistance"})
         if not user.is_superuser and program.tenant_id != user.tenant_id:
             raise serializers.ValidationError("Program belongs to another tenant")
+        attrs["household"] = household
         return attrs
+
+    def get_household_reference(self, obj):
+        return household_reference(obj.household or getattr(obj.beneficiary, "household", None))
+
+    def get_household_member_count(self, obj):
+        return household_member_count(obj.household or getattr(obj.beneficiary, "household", None))
 
 
 class StockMovementSerializer(serializers.ModelSerializer):
@@ -282,6 +380,8 @@ class DistributionEventSerializer(serializers.ModelSerializer):
 
 
 class DistributionAllocationSerializer(serializers.ModelSerializer):
+    household_reference = serializers.SerializerMethodField()
+    household_member_count = serializers.SerializerMethodField()
     beneficiary_name = serializers.CharField(source="beneficiary.full_name", read_only=True)
     national_id_reference = serializers.SerializerMethodField()
     item_name = serializers.CharField(source="item.name", read_only=True)
@@ -295,27 +395,44 @@ class DistributionAllocationSerializer(serializers.ModelSerializer):
         fields = "__all__"
         read_only_fields = ["created_by", "created_at"]
 
+    def get_committed_quantity(self, item):
+        return item.entitlements.filter(status__in=[NFIEntitlement.Status.ACTIVE, NFIEntitlement.Status.DISTRIBUTED]).aggregate(total=Sum("quantity"))["total"] or 0
+
+    def get_delivered_quantity(self, item):
+        return item.issues.aggregate(total=Sum("actual_quantity"))["total"] or 0
+
     def get_national_id_reference(self, allocation):
-        return safe_beneficiary_reference(allocation.beneficiary)
+        return safe_beneficiary_reference(allocation.beneficiary) if allocation.beneficiary else "Not recorded"
 
     def validate(self, attrs):
         entitlement = attrs.get("entitlement") or self.instance.entitlement
         event = attrs.get("event") or self.instance.event
         item = attrs.get("item") or self.instance.item
-        beneficiary = attrs.get("beneficiary") or self.instance.beneficiary
+        beneficiary = attrs.get("beneficiary") or getattr(self.instance, "beneficiary", None)
+        household = attrs.get("household") or getattr(self.instance, "household", None) or entitlement.household or getattr(beneficiary, "household", None)
         planned = attrs.get("planned_quantity", self.instance.planned_quantity if self.instance else 0)
         allocated = attrs.get("allocated_quantity", self.instance.allocated_quantity if self.instance else 0)
-        if entitlement.beneficiary_id != beneficiary.id or entitlement.item_id != item.id:
-            raise serializers.ValidationError("Beneficiary and item must match the NFI entitlement")
+        if not household or entitlement.household_id != household.id or entitlement.item_id != item.id:
+            raise serializers.ValidationError("Household and item must match the NFI entitlement")
+        if beneficiary and beneficiary.household_id != household.id:
+            raise serializers.ValidationError("Member must belong to the selected household")
         if event.program_id != entitlement.program_id or event.warehouse_id != entitlement.warehouse_id:
             raise serializers.ValidationError("Distribution event must match the entitlement program and warehouse")
         already_allocated = DistributionAllocation.objects.filter(entitlement=entitlement).exclude(pk=getattr(self.instance, "pk", None)).aggregate(total=Sum("allocated_quantity"))["total"] or 0
         if planned != allocated or allocated < 1 or already_allocated + allocated > entitlement.quantity:
             raise serializers.ValidationError("Allocation must use the exact remaining entitlement quantity")
+        attrs["household"] = household
         return attrs
 
+    def get_household_reference(self, allocation):
+        return household_reference(allocation.household or allocation.entitlement.household)
+
+    def get_household_member_count(self, allocation):
+        return household_member_count(allocation.household or allocation.entitlement.household)
 
 class DistributionIssueSerializer(serializers.ModelSerializer):
+    household_reference = serializers.SerializerMethodField()
+    household_member_count = serializers.SerializerMethodField()
     beneficiary_name = serializers.CharField(source="beneficiary.full_name", read_only=True)
     national_id_reference = serializers.SerializerMethodField()
     item_name = serializers.CharField(source="item.name", read_only=True)
@@ -330,22 +447,25 @@ class DistributionIssueSerializer(serializers.ModelSerializer):
         read_only_fields = ["created_by", "created_at"]
 
     def get_national_id_reference(self, issue):
-        return safe_beneficiary_reference(issue.beneficiary)
+        return safe_beneficiary_reference(issue.beneficiary) if issue.beneficiary else "Not recorded"
 
     def validate(self, attrs):
         entitlement = attrs.get("entitlement") or self.instance.entitlement
         event = attrs.get("event") or self.instance.event
-        beneficiary = attrs.get("beneficiary") or self.instance.beneficiary
+        beneficiary = attrs.get("beneficiary") or getattr(self.instance, "beneficiary", None)
+        household = attrs.get("household") or getattr(self.instance, "household", None) or entitlement.household or getattr(beneficiary, "household", None)
         item = attrs.get("item") or self.instance.item
         planned = attrs.get("planned_quantity", self.instance.planned_quantity if self.instance else None)
         actual = attrs.get("actual_quantity", self.instance.actual_quantity if self.instance else 0)
-        if entitlement.beneficiary_id != beneficiary.id or entitlement.item_id != item.id:
-            raise serializers.ValidationError("Beneficiary and item must match the entitlement")
+        if not household or entitlement.household_id != household.id or entitlement.item_id != item.id:
+            raise serializers.ValidationError("Household and item must match the entitlement")
+        if beneficiary and beneficiary.household_id != household.id:
+            raise serializers.ValidationError("Member must belong to the selected household")
         if event.program_id != entitlement.program_id or (event.warehouse_id and event.warehouse_id != entitlement.warehouse_id):
             raise serializers.ValidationError("Distribution event must match the entitlement program and warehouse")
         if not event.warehouse_id:
             raise serializers.ValidationError({"event": "Distribution event must have a warehouse"})
-        allocation = DistributionAllocation.objects.filter(entitlement=entitlement, event=event, beneficiary=beneficiary, item=item).first()
+        allocation = DistributionAllocation.objects.filter(entitlement=entitlement, event=event, household=household, item=item).first()
         if not allocation:
             raise serializers.ValidationError("Delivery review requires an allocation from this distribution event")
         already_delivered = DistributionIssue.objects.filter(entitlement=entitlement, event=event).exclude(pk=getattr(self.instance, "pk", None)).aggregate(total=Sum("actual_quantity"))["total"] or 0
@@ -354,7 +474,14 @@ class DistributionIssueSerializer(serializers.ModelSerializer):
         user = self.context["request"].user
         if not user.is_superuser and event.program.tenant_id != user.tenant_id:
             raise serializers.ValidationError("Distribution event belongs to another tenant")
+        attrs["household"] = household
         return attrs
+
+    def get_household_reference(self, issue):
+        return household_reference(issue.household or issue.entitlement.household)
+
+    def get_household_member_count(self, issue):
+        return household_member_count(issue.household or issue.entitlement.household)
 
 
 class ProgramActivitySerializer(serializers.ModelSerializer):
@@ -415,7 +542,7 @@ class HouseholdSerializer(serializers.ModelSerializer):
     class Meta:
         model = Household
         fields = "__all__"
-        read_only_fields = ["tenant", "created_by", "created_at", "client_generated_id"]
+        read_only_fields = ["tenant", "created_by", "created_at"]
 
     def validate_program(self, program):
         if program.tenant_id != self.context["request"].user.tenant_id:
@@ -423,14 +550,13 @@ class HouseholdSerializer(serializers.ModelSerializer):
         return program
 
     def get_registration_reference(self, household):
-        return household.client_generated_id or f"HH-{str(household.id).split('-')[0].upper()}"
+        return household_reference(household)
 
 
 class BeneficiarySerializer(serializers.ModelSerializer):
     number = serializers.CharField(write_only=True, required=False)
     national_id = serializers.CharField(write_only=True, required=False)
     national_id_hash = serializers.CharField(write_only=True, required=False)
-    phone_last4 = serializers.CharField(write_only=True, required=False)
     household_reference = serializers.SerializerMethodField()
     program_name = serializers.CharField(source="household.program.name", read_only=True)
     national_id_reference = serializers.SerializerMethodField()
@@ -458,7 +584,6 @@ class BeneficiarySerializer(serializers.ModelSerializer):
         if request.user.role == User.Role.FIELD_OFFICER and protected_fields.intersection(attrs):
             raise serializers.ValidationError("Field officers cannot set verification or workflow status.")
         attrs.pop("national_id_hash", None)
-        attrs.pop("phone_last4", None)
         submitted_national_id = attrs.pop("national_id", None) or attrs.get("number")
         if submitted_national_id:
             normalized_national_id = normalize_national_id(submitted_national_id)
@@ -469,23 +594,24 @@ class BeneficiarySerializer(serializers.ModelSerializer):
         if "phone_number" in attrs:
             normalized_phone = normalize_phone_number(attrs["phone_number"])
             attrs["phone_number"] = normalized_phone
-            attrs["phone_last4"] = normalized_phone[-4:] if normalized_phone else ""
         return attrs
 
     def get_household_reference(self, beneficiary):
         household = beneficiary.household
-        return household.client_generated_id or f"HH-{str(household.id).split('-')[0].upper()}"
+        return household_reference(household)
 
     def get_national_id_reference(self, beneficiary):
         return safe_beneficiary_reference(beneficiary)
         return f"•••• {beneficiary.number[-4:]}" if beneficiary.number else "Not recorded"
 
     def get_masked_phone(self, beneficiary):
-        phone_number = beneficiary.phone_number or beneficiary.phone_last4
+        phone_number = beneficiary.phone_number
         return f"**** {phone_number[-4:]}" if phone_number else "Not recorded"
 
 
 class EnrollmentSerializer(serializers.ModelSerializer):
+    household_reference = serializers.SerializerMethodField()
+    household_member_count = serializers.SerializerMethodField()
     beneficiary_name = serializers.CharField(source="beneficiary.full_name", read_only=True)
     beneficiary_number = serializers.SerializerMethodField()
     national_id_reference = serializers.SerializerMethodField()
@@ -497,17 +623,28 @@ class EnrollmentSerializer(serializers.ModelSerializer):
         read_only_fields = ["approved_by", "approved_at", "enrolled_at"]
 
     def get_beneficiary_number(self, enrollment):
-        return f"•••• {enrollment.beneficiary.number[-4:]}" if enrollment.beneficiary.number else "Not recorded"
+        return safe_beneficiary_reference(enrollment.beneficiary) if enrollment.beneficiary else "Not recorded"
 
     def get_national_id_reference(self, enrollment):
-        return safe_beneficiary_reference(enrollment.beneficiary)
+        return safe_beneficiary_reference(enrollment.beneficiary) if enrollment.beneficiary else "Not recorded"
+
+    def get_household_reference(self, enrollment):
+        return household_reference(enrollment.household or getattr(enrollment.beneficiary, "household", None))
+
+    def get_household_member_count(self, enrollment):
+        return household_member_count(enrollment.household or getattr(enrollment.beneficiary, "household", None))
 
     def validate(self, attrs):
-        beneficiary = attrs.get("beneficiary") or self.instance.beneficiary
-        program = attrs.get("program") or self.instance.program
+        beneficiary = attrs.get("beneficiary") or getattr(self.instance, "beneficiary", None)
+        household = attrs.get("household") or getattr(self.instance, "household", None) or getattr(beneficiary, "household", None)
+        program = attrs.get("program") or getattr(self.instance, "program", None)
         user = self.context["request"].user
-        if beneficiary.household.tenant_id != program.tenant_id:
-            raise serializers.ValidationError("Beneficiary and program must belong to the same tenant")
+        if not household or household.program_id != program.id:
+            raise serializers.ValidationError({"household": "Household must be registered in the selected program"})
+        if beneficiary and beneficiary.household_id != household.id:
+            raise serializers.ValidationError({"beneficiary": "Member must belong to the selected household"})
+        if household.tenant_id != program.tenant_id:
+            raise serializers.ValidationError("Household and program must belong to the same tenant")
         if not user.is_superuser and program.tenant_id != user.tenant_id:
             raise serializers.ValidationError("Program belongs to another tenant")
         submitted_modality = self.initial_data.get("assistance_modality") if self.initial_data is not None else None
@@ -523,6 +660,7 @@ class EnrollmentSerializer(serializers.ModelSerializer):
         else:
             modality = Enrollment.AssistanceModality.CASH
         attrs["assistance_modality"] = modality
+        attrs["household"] = household
         if modality in {Enrollment.AssistanceModality.CASH, Enrollment.AssistanceModality.CASH_NFI} and not program.cash_enabled:
             raise serializers.ValidationError({"assistance_modality": "Payment is disabled for this program"})
         if modality in {Enrollment.AssistanceModality.NFI, Enrollment.AssistanceModality.CASH_NFI} and not program.nfi_enabled:
@@ -638,7 +776,7 @@ class ComplaintSerializer(serializers.ModelSerializer):
 
     def get_household_reference(self, complaint):
         household = complaint.beneficiary.household
-        return household.client_generated_id or f"HH-{str(household.id).split('-')[0].upper()}"
+        return household_reference(household)
 
     def get_ai_analysis_available(self, complaint):
         return ComplaintAIAnalysis.objects.filter(complaint=complaint).exists()

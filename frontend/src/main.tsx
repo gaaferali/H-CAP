@@ -825,7 +825,8 @@ const routeFromHash = (): Route =>
   (Object.entries(routePaths).find(
     ([, path]) => path === location.hash.replace("#/", ""),
   )?.[0] as Route) ?? "dashboard";
-const valueOf = (record: Entity, key: string) => {
+const valueOf = (record: Entity | undefined, key: string) => {
+  if (!record) return "";
   const value = String(record[key] ?? "");
   return key === "relationship_type" && value === "FS"
     ? "Finish to start"
@@ -838,12 +839,17 @@ const beneficiaryLabel = (beneficiary: Entity) =>
   `${valueOf(beneficiary, "national_id_reference") || "National ID"} — ${beneficiary.full_name || "Unnamed"}`;
 const enrollmentLabel = (enrollment: Entity) =>
   `${valueOf(enrollment, "beneficiary_number") || "Beneficiary"} — ${valueOf(enrollment, "beneficiary_name") || "Unnamed"} (${valueOf(enrollment, "program_name") || "Program"})`;
-const nfiBeneficiaryLabel = (record: Entity) =>
-  [valueOf(record, "beneficiary_name") || "Beneficiary", valueOf(record, "national_id_reference")]
+const nfiBeneficiaryLabel = (record: Entity) => {
+  const nationalIdReference = valueOf(record, "national_id_reference");
+  return [
+    valueOf(record, "beneficiary_name"),
+    nationalIdReference === "Not recorded" ? "" : nationalIdReference,
+  ]
     .filter(Boolean)
     .join(" - ");
+};
 const nfiEntitlementLabel = (record: Entity) =>
-  `${nfiBeneficiaryLabel(record)} - ${valueOf(record, "item_name") || "NFI item"}`;
+  `${valueOf(record, "household_reference") || nfiBeneficiaryLabel(record) || "Household"} - ${valueOf(record, "item_name") || "NFI item"}`;
 const distributionEventLabel = (record: Entity) =>
   [valueOf(record, "event_date"), valueOf(record, "event_location") || valueOf(record, "location"), valueOf(record, "warehouse_name")]
     .filter(Boolean)
@@ -2154,6 +2160,7 @@ function Intake({ beneficiary, role }: { beneficiary: boolean; role: Role }) {
   const [records, setRecords] = useState<Entity[]>([]);
   const [programs, setPrograms] = useState<Entity[]>([]);
   const [households, setHouseholds] = useState<Entity[]>([]);
+  const [selectedProgram, setSelectedProgram] = useState("");
   const [selectedHousehold, setSelectedHousehold] = useState(() =>
     beneficiary
       ? (sessionStorage.getItem("hcap_selected_household_id") ?? "")
@@ -2165,13 +2172,14 @@ function Intake({ beneficiary, role }: { beneficiary: boolean; role: Role }) {
   const [error, setError] = useState("");
   const load = async () => {
     try {
-      const [recordResponse, contextResponse] = await Promise.all([
+      const [recordResponse, programResponse, householdResponse] = await Promise.all([
         api.list<Entity>(resource),
-        api.list<Entity>(beneficiary ? "households" : "programs"),
+        api.list<Entity>("programs"),
+        api.list<Entity>("households"),
       ]);
       setRecords(listItems(recordResponse));
-      if (beneficiary) setHouseholds(listItems(contextResponse));
-      else setPrograms(listItems(contextResponse));
+      setPrograms(listItems(programResponse));
+      setHouseholds(listItems(householdResponse));
     } catch (reason) {
       setError(
         reason instanceof Error
@@ -2302,9 +2310,23 @@ function Intake({ beneficiary, role }: { beneficiary: boolean; role: Role }) {
             {beneficiary ? (
               <>
                 <SelectField
+                  label="Program"
+                  name="program"
+                  options={programs.map((program) => ({
+                    value: program.id,
+                    label: programLabel(program),
+                  }))}
+                  value={selectedProgram}
+                  onChange={(value) => {
+                    setSelectedProgram(value);
+                    setSelectedHousehold("");
+                  }}
+                  required
+                />
+                <SelectField
                   label="Household"
                   name="household"
-                  options={households.map((household) => ({
+                  options={households.filter((household) => valueOf(household, "program") === selectedProgram).map((household) => ({
                     value: household.id,
                     label: householdLabel(household),
                   }))}
@@ -2455,7 +2477,9 @@ function Intake({ beneficiary, role }: { beneficiary: boolean; role: Role }) {
 
 function EligibilityPage() {
   const [programs, setPrograms] = useState<Entity[]>([]);
-  const [beneficiaries, setBeneficiaries] = useState<Entity[]>([]);
+  const [households, setHouseholds] = useState<Entity[]>([]);
+  const [selectedProgram, setSelectedProgram] = useState("");
+  const [eligibility, setEligibility] = useState<Entity[]>([]);
   const [enrollments, setEnrollments] = useState<Entity[]>([]);
   const [signals, setSignals] = useState<Entity[]>([]);
   const [tasks, setTasks] = useState<Entity[]>([]);
@@ -2465,19 +2489,22 @@ function EligibilityPage() {
     try {
       const [
         programResponse,
-        beneficiaryResponse,
+        householdResponse,
+        eligibilityResponse,
         enrollmentResponse,
         signalResponse,
         taskResponse,
       ] = await Promise.all([
         api.list<Entity>("programs"),
-        api.list<Entity>("beneficiaries"),
+        api.list<Entity>("households"),
+        api.list<Entity>("household-eligibility"),
         api.list<Entity>("enrollments"),
         api.list<Entity>("ai-signals"),
         api.list<Entity>("review-tasks"),
       ]);
       setPrograms(listItems(programResponse));
-      setBeneficiaries(listItems(beneficiaryResponse));
+      setHouseholds(listItems(householdResponse));
+      setEligibility(listItems(eligibilityResponse));
       setEnrollments(listItems(enrollmentResponse));
       setSignals(listItems(signalResponse));
       setTasks(listItems(taskResponse));
@@ -2499,11 +2526,10 @@ function EligibilityPage() {
     setStatus("saving");
     setError("");
     try {
-      await api.create("enrollments", {
+      await api.create("household-eligibility", {
         program: form.get("program"),
-        beneficiary: form.get("beneficiary"),
-        eligibility_status: form.get("eligibility_status"),
-        status: "ENROLLED",
+        household: form.get("household"),
+        status: form.get("eligibility_status"),
       });
       formElement.reset();
       await load();
@@ -2525,9 +2551,9 @@ function EligibilityPage() {
     setError("");
     try {
       await api.update(
-        "enrollments",
+        "household-eligibility",
         String(form.get("eligibility_enrollment")),
-        { eligibility_status: form.get("updated_eligibility_status") },
+        { status: form.get("updated_eligibility_status") },
       );
       await load();
       setStatus("saved");
@@ -2552,14 +2578,16 @@ function EligibilityPage() {
                 value: program.id,
                 label: programLabel(program),
               }))}
+              value={selectedProgram}
+              onChange={setSelectedProgram}
               required
             />
             <SelectField
-              label="Beneficiary"
-              name="beneficiary"
-              options={beneficiaries.map((item) => ({
+              label="Household"
+              name="household"
+              options={households.filter((item) => valueOf(item, "program") === selectedProgram).map((item) => ({
                 value: item.id,
-                label: `${beneficiaryLabel(item)} — ${valueOf(item, "household_reference")}`,
+                label: householdLabel(item),
               }))}
               required
             />
@@ -2577,15 +2605,15 @@ function EligibilityPage() {
         </Panel>
         <Panel title="Update eligibility status">
           <p className="section-lead">
-            Select an existing enrollment to save a new eligibility status.
+             Select an existing household eligibility review to save a new status.
           </p>
           <form onSubmit={updateEligibility}>
             <SelectField
-              label="Enrollment"
+              label="Household eligibility"
               name="eligibility_enrollment"
-              options={enrollments.map((item) => ({
+              options={eligibility.map((item) => ({
                 value: item.id,
-                label: enrollmentLabel(item),
+                label: `${valueOf(item, "household_reference") || "Household"} — ${valueOf(item, "program_name") || "Program"}`,
               }))}
               required
             />
@@ -2606,18 +2634,18 @@ function EligibilityPage() {
         <Panel title="Eligibility and advisory work">
           <Table
             headings={[
-              "Beneficiary",
+              "Household",
               "Program",
               "Eligibility",
-              "Enrollment status",
+              "Members",
             ]}
-            rows={enrollments.map((item) => [
-              enrollmentLabel(item),
+            rows={eligibility.map((item) => [
+              valueOf(item, "household_reference") || "Household",
               valueOf(item, "program_name"),
               <Badge
-                value={valueOf(item, "eligibility_status") || "PENDING"}
+                value={valueOf(item, "status") || "PENDING"}
               />,
-              <Badge value={item.status ?? "ENROLLED"} />,
+              valueOf(item, "member_count") || 0,
             ])}
           />
           <Table
@@ -2735,17 +2763,20 @@ function EnrollmentDecisionPage() {
 function EnrollmentModalityPage() {
   const [enrollments, setEnrollments] = useState<Entity[]>([]);
   const [programs, setPrograms] = useState<Entity[]>([]);
-  const [selectedEnrollmentId, setSelectedEnrollmentId] = useState("");
+  const [eligibility, setEligibility] = useState<Entity[]>([]);
+  const [selectedProgramId, setSelectedProgramId] = useState("");
   const [status, setStatus] = useState("");
   const [error, setError] = useState("");
   const load = async () => {
     try {
-      const [enrollmentResponse, programResponse] = await Promise.all([
-        api.list<Entity>("enrollments"),
+      const [enrollmentResponse, programResponse, eligibilityResponse] = await Promise.all([
+        api.list<Entity>("household-enrollments"),
         api.list<Entity>("programs"),
+        api.list<Entity>("household-eligibility"),
       ]);
       setEnrollments(listItems(enrollmentResponse));
       setPrograms(listItems(programResponse));
+      setEligibility(listItems(eligibilityResponse));
     } catch (reason) {
       setError(
         reason instanceof Error
@@ -2759,14 +2790,18 @@ function EnrollmentModalityPage() {
   }, []);
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    const form = new FormData(event.currentTarget);
+    const formElement = event.currentTarget;
+    const form = new FormData(formElement);
     setStatus("saving");
     setError("");
     try {
-      await api.update("enrollments", String(form.get("enrollment")), {
+      await api.create("household-enrollments", {
+        household: form.get("household"),
+        program: selectedProgramId,
         status: form.get("status"),
         assistance_modality: form.get("assistance_modality"),
       });
+      formElement.reset();
       await load();
       setStatus("saved");
     } catch (reason) {
@@ -2774,12 +2809,16 @@ function EnrollmentModalityPage() {
       setError(
         reason instanceof Error
           ? reason.message
-          : "Could not save the beneficiary modality.",
+          : "Could not save the household enrollment.",
       );
     }
   };
-  const selected = enrollments.find((row) => row.id === selectedEnrollmentId);
-  const program = programs.find((row) => row.id === (selected?.program ?? ""));
+  const program = programs.find((row) => row.id === selectedProgramId);
+  const eligibleHouseholds = eligibility.filter(
+    (row) =>
+      valueOf(row, "program") === selectedProgramId &&
+      valueOf(row, "status") === "ELIGIBLE",
+  );
   const options =
     program?.cash_enabled && program?.nfi_enabled
       ? ["CASH", "NFI", "CASH_NFI"]
@@ -2791,23 +2830,32 @@ function EnrollmentModalityPage() {
   return (
     <div className="row g-3">
       <div className="col-lg-5">
-        <Panel title="Beneficiary enrollment and modality">
+        <Panel title="Household enrollment and modality">
           <form onSubmit={submit}>
             <SelectField
-              label="Enrollment"
-              name="enrollment"
-              options={enrollments.map((item) => ({
+              label="Program"
+              name="program"
+              options={programs.map((item) => ({
                 value: item.id,
-                label: enrollmentLabel(item),
+                label: programLabel(item),
               }))}
-              value={selectedEnrollmentId}
-              onChange={setSelectedEnrollmentId}
+              value={selectedProgramId}
+              onChange={setSelectedProgramId}
+              required
+            />
+            <SelectField
+              label="Eligible household"
+              name="household"
+              options={eligibleHouseholds.map((item) => ({
+                value: valueOf(item, "household"),
+                label: `${valueOf(item, "household_reference") || "Household"} — ${valueOf(item, "member_count") || 0} members`,
+              }))}
               required
             />
             <SelectField
               label="Decision"
               name="status"
-              options={["APPROVED", "REJECTED"].map((value) => ({
+              options={["PENDING", "APPROVED", "REJECTED", "SUSPENDED"].map((value) => ({
                 value,
                 label: value,
               }))}
@@ -2830,7 +2878,7 @@ function EnrollmentModalityPage() {
             />
             <p className="form-text">
               Only modalities enabled for the selected program are available.
-              Other Assistance is not an operational choice.
+              A household must first have an eligible household review.
             </p>
             <button className="btn btn-primary">
               Save enrollment decision
@@ -2843,20 +2891,18 @@ function EnrollmentModalityPage() {
         <Panel title="Enrollment history">
           <Table
             headings={[
-              "Beneficiary",
+              "Household",
               "Program",
-              "Eligibility",
+              "Members",
               "Modality",
               "Decision",
             ]}
             rows={enrollments.map((item) => [
-              enrollmentLabel(item),
+              valueOf(item, "household_reference") || "Household",
               valueOf(item, "program_name"),
-              <Badge
-                value={valueOf(item, "eligibility_status") || "PENDING"}
-              />,
+              valueOf(item, "member_count") || 0,
               valueOf(item, "assistance_modality") || "CASH",
-              <Badge value={item.status ?? "ENROLLED"} />,
+              <Badge value={valueOf(item, "status") || "PENDING"} />,
             ])}
           />
         </Panel>
@@ -2885,7 +2931,7 @@ function PaymentsPage({ role }: { role: Role }) {
         instructionResponse,
       ] = await Promise.all([
         api.list<Entity>("programs"),
-        api.list<Entity>("enrollments"),
+        api.list<Entity>("household-enrollments"),
         api.list<Entity>("payment-batches"),
         api.list<Entity>("payment-instructions"),
       ]);
@@ -5591,6 +5637,7 @@ function AssistancePage({ role }: { role: Role }) {
     setDeliveryError("");
     try {
       await api.create("distribution-issues", {
+        household: form.get("household"),
         beneficiary: form.get("beneficiary"),
         entitlement: form.get("entitlement"),
         item: form.get("item"),
@@ -5619,9 +5666,8 @@ function AssistancePage({ role }: { role: Role }) {
       <div className="col-12">
         <Panel title="Assistance delivery">
           <p className="section-lead">
-            Household eligibility and enrollment continue to control
-            beneficiary-level assistance. Other Assistance is Coming Soon and
-            has no execution workflow.
+            Household eligibility and enrollment control cash and NFI assistance;
+            members are retained as secondary identity context.
           </p>
           <Message status="" error={error} />
         </Panel>
@@ -5629,9 +5675,10 @@ function AssistancePage({ role }: { role: Role }) {
       <div className="col-xl-6">
         <Panel title="Cash entitlements">
           <Table
-            headings={["Beneficiary", "Amount", "Currency", "Status"]}
+            headings={["Program", "Household", "Amount", "Currency", "Status"]}
             rows={cash.map((item) => [
-              valueOf(item, "beneficiary"),
+              valueOf(item, "program_name") || "Program",
+              valueOf(item, "household_reference") || "Household",
               valueOf(item, "amount"),
               valueOf(item, "currency"),
               <Badge value={valueOf(item, "status")} />,
@@ -5642,9 +5689,10 @@ function AssistancePage({ role }: { role: Role }) {
       <div className="col-xl-6">
         <Panel title="NFI entitlements">
           <Table
-            headings={["Beneficiary", "Item", "Quantity", "Status"]}
+            headings={["Program", "Household", "Item", "Quantity", "Status"]}
             rows={nfi.map((item) => [
-              nfiBeneficiaryLabel(item),
+              valueOf(item, "program_name") || "Program",
+              valueOf(item, "household_reference") || nfiBeneficiaryLabel(item),
               valueOf(item, "item_name") || "NFI item",
               valueOf(item, "quantity"),
               <Badge value={valueOf(item, "status")} />,
@@ -5735,7 +5783,7 @@ function NfiEntitlementsPage({ role }: { role: Role }) {
   const validEnrollments = enrollments.filter(
     (row) =>
       valueOf(row, "program") === programId &&
-      row.status === "APPROVED" &&
+      ["ACCEPTED", "APPROVED"].includes(valueOf(row, "status")) &&
       ["NFI", "CASH_NFI"].includes(valueOf(row, "assistance_modality")),
   );
   const programWarehouses = warehouses.filter(
@@ -5757,7 +5805,7 @@ function NfiEntitlementsPage({ role }: { role: Role }) {
     try {
       await api.create("nfi-entitlements", {
         program: programId,
-        beneficiary: form.get("beneficiary"),
+        household: form.get("household"),
         warehouse: form.get("warehouse"),
         item: form.get("item"),
         quantity: Number(form.get("quantity")),
@@ -5784,8 +5832,9 @@ function NfiEntitlementsPage({ role }: { role: Role }) {
       <div className="col-12">
         <Panel title="NFI Entitlements">
           <p className="section-lead">
-            Finance creates beneficiary-level NFI entitlements only for approved
-            beneficiaries whose modality includes NFI. Available stock is
+            Finance creates household-level NFI entitlements only for approved
+            households whose modality includes NFI. A member may be retained as
+            supporting identity context. Available stock is
             reserved exactly once when the entitlement is saved.
           </p>
         </Panel>
@@ -5809,11 +5858,11 @@ function NfiEntitlementsPage({ role }: { role: Role }) {
                 required
               />
               <SelectField
-                label="Approved NFI beneficiary"
-                name="beneficiary"
-                options={validEnrollments.map((row) => ({
-                  value: valueOf(row, "beneficiary"),
-                  label: `${nfiBeneficiaryLabel(row)} - ${valueOf(row, "assistance_modality")}`,
+              label="Approved NFI household"
+              name="household"
+              options={validEnrollments.map((row) => ({
+                  value: valueOf(row, "household"),
+                  label: `${valueOf(row, "household_reference") || "Household"} — ${valueOf(row, "member_count") || 0} members — ${valueOf(row, "assistance_modality")}`,
                 }))}
                 required
               />
@@ -5856,7 +5905,8 @@ function NfiEntitlementsPage({ role }: { role: Role }) {
           <Table
             headings={[
               "Program",
-              "Beneficiary",
+              "Household",
+              "Member",
               "Item",
               "Warehouse",
               "Quantity",
@@ -5864,7 +5914,8 @@ function NfiEntitlementsPage({ role }: { role: Role }) {
             ]}
             rows={entitlements.map((row) => [
               valueOf(row, "program_name") || "Program",
-              nfiBeneficiaryLabel(row),
+              valueOf(row, "household_reference") || "Household",
+              nfiBeneficiaryLabel(row) || "Not recorded",
               valueOf(row, "item_name") || "NFI item",
               valueOf(row, "warehouse_name") || "Warehouse",
               valueOf(row, "quantity"),
@@ -6142,6 +6193,7 @@ function ReviewerDeliveryPage({ role }: { role: Role }) {
     setError("");
     try {
       await api.create("distribution-issues", {
+        household: selected?.household,
         beneficiary: selected?.beneficiary,
         entitlement: selected?.id,
         item: selected?.item,
@@ -6233,6 +6285,8 @@ function ReviewerDeliveryPage({ role }: { role: Role }) {
             headings={[
               "Entitlement",
               "Event",
+              "Program",
+              "Household",
               "Planned",
               "Actual",
               "Result",
@@ -6241,6 +6295,8 @@ function ReviewerDeliveryPage({ role }: { role: Role }) {
             rows={issues.map((row) => [
               nfiEntitlementLabel(row),
               distributionEventLabel(row),
+              valueOf(row, "program_name") || "Program",
+              valueOf(row, "household_reference") || "Household",
               valueOf(row, "planned_quantity"),
               valueOf(row, "actual_quantity"),
               <Badge value={valueOf(row, "delivery_status")} />,
@@ -6296,6 +6352,7 @@ function ReviewerNfiDeliveryPage({ role }: { role: Role }) {
     setError("");
     try {
       await api.create("distribution-issues", {
+        household: selected.household,
         beneficiary: selected.beneficiary,
         entitlement: selected.entitlement,
         item: selected.item,
