@@ -17,37 +17,6 @@ than in vscode terminal just run:
 docker compose up --build
 open locallhost
 
-email gaafer@gmail.com
-password gaafer
+email admin@gmail.com
+password admin
 
-For local backend development, start the database first with `docker compose up -d db`, then run `backend\.venv\Scripts\python.exe backend\manage.py runserver`. for testing `backend python manage.py test` or `.\.venv\Scripts\python.exe manage.py test core  ` The default local database port is `5433`, matching `docker-compose.yml`.
-
-## Implemented Scope
-
-
-- program KPIs.
-- Mand fake payment simulation foundations.
-
-### Household-centered operations
-
-Eligibility, enrollment, cash/NFI entitlements, distribution allocations, and delivery review are household-driven. Beneficiaries remain household members and are retained as secondary identity context. Program selectors must be chosen before dependent household/member selectors; the API validates tenant and program relationships independently of the UI.
-
-Payment instructions are created from an approved household cash entitlement. The API verifies the household's approved cash modality, program and tenant scope, active program channel, optional matching batch, and exact entitlement amount/currency. Existing payment instructions remain readable; migration `0017_household_payment_instructions` links only unambiguous legacy instructions to a matching entitlement and leaves ambiguous rows unchanged. Payment processing uses only the simulated lifecycle and controlled actions.
-
-Cash entitlements are checked transactionally against the selected program budget. NFI entitlements lock the catalogue item while checking available stock. Distribution allocations and delivery updates lock the entitlement/event records and revalidate quantities before writing. Cancellation, edits, allocation, and delivery update the corresponding capacity and audit records. Existing beneficiary-level records are preserved through nullable compatibility links and backfilled household links by migration `0015_household_centered_workflow`.
-
-#### Workflow permissions
-
-| Role | Household eligibility/enrollment | Cash/NFI entitlements and stock | Payments | Distribution and delivery review |
-|---|---|---|---|---|
-| Admin | View and manage | View and manage | View and manage via simulator actions | View and manage |
-| Manager | View and manage | View and manage | View and manage via simulator actions | View and manage |
-| Reviewer | View and conduct authorized human review | Read-only | Read-only | View and record authorized delivery review |
-| Finance | Read-only access to approved household enrollment | View and manage entitlements; read catalogue/stock | View and manage via simulator actions | Read-only for events, allocations, and delivery records |
-| Auditor | Read-only | Read-only | Read-only | Read-only |
-
-The API enforces tenant-scoped reads and role-based write permissions; frontend route visibility is not an authorization control.
-
-The household registration reference replaces the redundant client-generated model field, and phone masking is derived from the authoritative full phone number. National IDs remain hashed and are never returned raw. Payment integrations remain simulated; payment events are append-only/corrective and human review remains advisory.
-
-Run migrations with `python manage.py migrate`, backend tests with `python manage.py test`, and the frontend production check with `npm.cmd run build` from `frontend`.
