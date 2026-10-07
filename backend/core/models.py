@@ -236,6 +236,12 @@ class PaymentChannelConfig(models.Model):
     channel_type = models.CharField(max_length=20, choices=ChannelType.choices)
     provider_name = models.CharField(max_length=255)
     currency = models.CharField(max_length=3)
+    fee_amount = models.DecimalField(
+        max_digits=18,
+        decimal_places=2,
+        default=0,
+        validators=[MinValueValidator(0)],
+    )
     is_active = models.BooleanField(default=True)
 
 
@@ -255,6 +261,12 @@ class PaymentInstruction(models.Model):
     beneficiary = models.ForeignKey(Beneficiary, on_delete=models.PROTECT, null=True, blank=True, related_name="payment_instructions")
     channel_config = models.ForeignKey(PaymentChannelConfig, on_delete=models.PROTECT, related_name="payment_instructions")
     amount = models.DecimalField(max_digits=18, decimal_places=2, validators=[MinValueValidator(0.01)])
+    applied_fee = models.DecimalField(
+        max_digits=18,
+        decimal_places=2,
+        default=0,
+        validators=[MinValueValidator(0)],
+    )
     currency = models.CharField(max_length=3)
     status = models.CharField(max_length=20, choices=Status.choices, default=Status.DRAFT)
     provider_reference = models.CharField(max_length=120, blank=True)
@@ -301,6 +313,33 @@ class PaymentEvent(models.Model):
     redacted_payload = models.JSONField(default=dict, blank=True, encoder=DjangoJSONEncoder)
     recorded_by = models.ForeignKey(User, on_delete=models.PROTECT, null=True, blank=True, related_name="payment_events")
     created_at = models.DateTimeField(default=django_timezone.now)
+
+
+class PaymentDeliveryReview(models.Model):
+    class DeliveryStatus(models.TextChoices):
+        RECEIVED = "RECEIVED", "Received"
+        PARTIALLY_RECEIVED = "PARTIALLY_RECEIVED", "Partially received"
+        NOT_RECEIVED = "NOT_RECEIVED", "Not received"
+        NO_SHOW = "NO_SHOW", "No show"
+        REJECTED = "REJECTED", "Rejected"
+        RESCHEDULED = "RESCHEDULED", "Rescheduled"
+        EXCEPTION = "EXCEPTION", "Exception"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    payment_instruction = models.OneToOneField(
+        PaymentInstruction,
+        on_delete=models.PROTECT,
+        related_name="delivery_review",
+    )
+    household = models.ForeignKey(Household, on_delete=models.PROTECT, related_name="payment_delivery_reviews")
+    program = models.ForeignKey(Program, on_delete=models.PROTECT, related_name="payment_delivery_reviews")
+    delivery_status = models.CharField(max_length=30, choices=DeliveryStatus.choices)
+    note = models.TextField(blank=True)
+    evidence = models.TextField(blank=True)
+    reviewed_by = models.ForeignKey(User, on_delete=models.PROTECT, related_name="payment_delivery_reviews")
+    reviewed_at = models.DateTimeField(default=django_timezone.now)
+    created_at = models.DateTimeField(default=django_timezone.now)
+    updated_at = models.DateTimeField(auto_now=True)
 
 
 class Complaint(models.Model):

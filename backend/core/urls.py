@@ -46,6 +46,7 @@ from .views import (
     HouseholdEligibilityViewSet, HouseholdEnrollmentViewSet, CashEntitlementViewSet,
     WarehouseViewSet, NFIItemViewSet, NFIEntitlementViewSet, StockMovementViewSet,
     DistributionEventViewSet, DistributionAllocationViewSet, DistributionIssueViewSet,
+    PaymentDeliveryReviewViewSet,
 )
 
 router = DefaultRouter()
@@ -77,6 +78,7 @@ router.register("stock-movements", StockMovementViewSet, basename="stock-movemen
 router.register("distribution-events", DistributionEventViewSet, basename="distribution-event")
 router.register("distribution-allocations", DistributionAllocationViewSet, basename="distribution-allocation")
 router.register("distribution-issues", DistributionIssueViewSet, basename="distribution-issue")
+router.register("payment-delivery-reviews", PaymentDeliveryReviewViewSet, basename="payment-delivery-review")
 
 urlpatterns = [
     path("", include(router.urls)),

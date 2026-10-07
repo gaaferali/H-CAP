@@ -50,6 +50,7 @@ from .models import (
     User,
     HouseholdEligibility, HouseholdEnrollment, CashEntitlement, Warehouse, NFIItem,
     NFIEntitlement, StockMovement, DistributionEvent, DistributionAllocation, DistributionIssue, IdempotencyRecord,
+    PaymentDeliveryReview,
 )
 from .serializers import (
     AuditEventSerializer,
@@ -81,7 +82,34 @@ from .serializers import (
     HouseholdEligibilitySerializer, HouseholdEnrollmentSerializer, CashEntitlementSerializer,
     WarehouseSerializer, NFIItemSerializer, NFIEntitlementSerializer, StockMovementSerializer,
     DistributionEventSerializer, DistributionAllocationSerializer, DistributionIssueSerializer,
+    PaymentDeliveryReviewSerializer,
 )
+
+
+def payment_budget_totals(program):
+    """Committed entitlements reserve funding; only successful payments consume fees."""
+    committed = CashEntitlement.objects.filter(
+        program=program,
+        status__in=[CashEntitlement.Status.ACTIVE, CashEntitlement.Status.PAID],
+    ).aggregate(total=Sum("amount"))["total"] or Decimal("0")
+    successful = PaymentInstruction.objects.filter(
+        cash_entitlement__program=program,
+        status=PaymentInstruction.Status.SUCCESS,
+    )
+    funding = successful.aggregate(total=Sum("amount"))["total"] or Decimal("0")
+    fees = successful.aggregate(total=Sum("applied_fee"))["total"] or Decimal("0")
+    budget = Budget.objects.filter(program=program).first()
+    budget_amount = budget.planned_total if budget else Decimal("0")
+    used = committed + fees
+    return {
+        "budget": budget,
+        "budget_amount": budget_amount,
+        "committed": committed,
+        "funding": funding,
+        "fees": fees,
+        "used": used,
+        "remaining": budget_amount - used,
+    }
 
 
 def api_exception_handler(exc, context):
@@ -516,6 +544,7 @@ class ProgramViewSet(RoleProtectedTenantViewSet):
         rule_ids = list(program.automation_rules.values_list("id", flat=True))
         audit(request.user, "PROGRAM_DELETED", program, after={"deleted_dependency_counts": {"households": len(household_ids), "beneficiaries": len(beneficiary_ids), "enrollments": len(enrollment_ids), "payment_instructions": len(instruction_ids), "activities": len(activity_ids), "automation_rules": len(rule_ids)}}, tenant=program.tenant)
         Complaint.objects.filter(Q(beneficiary_id__in=beneficiary_ids) | Q(instruction_id__in=instruction_ids)).delete()
+        PaymentDeliveryReview.objects.filter(payment_instruction_id__in=instruction_ids).delete()
         PaymentEvent.objects.filter(instruction_id__in=instruction_ids).delete()
         ReconciliationItem.objects.filter(Q(program=program) | Q(instruction_id__in=instruction_ids)).delete()
         PaymentInstruction.objects.filter(id__in=instruction_ids).delete()
@@ -570,7 +599,7 @@ class ProgramViewSet(RoleProtectedTenantViewSet):
         if not program.cash_enabled:
             raise ValidationError("Cash assistance is disabled for this program")
         if request.method == "GET":
-            return Response(PaymentChannelConfigSerializer(program.channels.all(), many=True).data)
+            return Response(PaymentChannelConfigSerializer(program.channels.all(), many=True, context={"request": request}).data)
         key = request.headers.get("Idempotency-Key", "").strip()
         fingerprint = sha256(json.dumps(request.data, sort_keys=True, default=str).encode("utf-8")).hexdigest() if key else ""
         record = None
@@ -587,10 +616,15 @@ class ProgramViewSet(RoleProtectedTenantViewSet):
                 if record.request_fingerprint != fingerprint:
                     raise ValidationError({"idempotency_key": "This idempotency key was already used with different data."})
                 return Response(record.response_body, status=record.response_status)
-        serializer = PaymentChannelConfigSerializer(data={**request.data, "program": str(program.id)})
+        serializer = PaymentChannelConfigSerializer(
+            data={**request.data, "program": str(program.id)},
+            context={"request": request},
+        )
         serializer.is_valid(raise_exception=True)
         channel = serializer.save()
         audit(request.user, "PAYMENT_CHANNEL_CONFIG_CREATED", channel, after=serializer.data, tenant=program.tenant)
+        if channel.fee_amount:
+            audit(request.user, "PAYMENT_CHANNEL_FEE_CONFIGURED", channel, after={"fee_amount": str(channel.fee_amount), "currency": channel.currency}, tenant=program.tenant)
         response = Response(serializer.data, status=status.HTTP_201_CREATED)
         if record is not None:
             record.response_status = response.status_code
@@ -700,6 +734,7 @@ class BeneficiaryViewSet(RoleProtectedTenantViewSet):
         )
         audit(request.user, "BENEFICIARY_DELETED", beneficiary, after={"deleted_dependency_counts": {"enrollments": len(enrollment_ids), "payment_instructions": len(instruction_ids)}}, tenant=beneficiary.household.tenant)
         Complaint.objects.filter(Q(beneficiary=beneficiary) | Q(instruction_id__in=instruction_ids)).delete()
+        PaymentDeliveryReview.objects.filter(payment_instruction_id__in=instruction_ids).delete()
         PaymentEvent.objects.filter(instruction_id__in=instruction_ids).delete()
         ReconciliationItem.objects.filter(instruction_id__in=instruction_ids).delete()
         PaymentInstruction.objects.filter(id__in=instruction_ids).delete()
@@ -756,66 +791,13 @@ class PaymentInstructionViewSet(RoleProtectedTenantViewSet):
     @transaction.atomic
     def perform_create(self, serializer):
         data = serializer.validated_data
-        household = data.get("household")
-        if household:
-            household = Household.objects.select_for_update().get(pk=household.pk)
-            program = Program.objects.select_for_update().get(pk=household.program_id)
-            if household.tenant_id != program.tenant_id:
-                raise ValidationError({"household": "Household and program must belong to the same tenant"})
-            if not HouseholdEligibility.objects.select_for_update().filter(
-                household=household,
-                program=program,
-                status=HouseholdEligibility.Status.ELIGIBLE,
-            ).exists():
-                raise ValidationError({"household": "Household must have eligible status"})
-            if not HouseholdEnrollment.objects.select_for_update().filter(
-                household=household,
-                program=program,
-                status=HouseholdEnrollment.Status.APPROVED,
-                assistance_modality__in=[
-                    Enrollment.AssistanceModality.CASH,
-                    Enrollment.AssistanceModality.CASH_NFI,
-                ],
-            ).exists():
-                raise ValidationError({"household": "Household must have approved cash enrollment"})
-            entitlement = data.get("cash_entitlement")
-            if entitlement:
-                entitlement = CashEntitlement.objects.select_for_update().get(pk=entitlement.pk)
-                if entitlement.household_id != household.pk or entitlement.program_id != program.pk:
-                    raise ValidationError({"cash_entitlement": "Cash entitlement must belong to the selected household and program"})
-            else:
-                entitlement = CashEntitlement.objects.select_for_update().filter(
-                    household=household,
-                    program=program,
-                    status=CashEntitlement.Status.ACTIVE,
-                ).order_by("created_at").first()
-            if not entitlement:
-                amount = program.transfer_amount
-                if amount is None:
-                    raise ValidationError({"amount": "Program transfer amount is required for household payment"})
-                budget = Budget.objects.select_for_update().filter(program=program).first()
-                if not budget:
-                    raise ValidationError({"program": "A program budget is required before creating a cash entitlement."})
-                committed = CashEntitlement.objects.select_for_update().filter(
-                    program=program,
-                    status__in=[CashEntitlement.Status.ACTIVE, CashEntitlement.Status.PAID],
-                ).aggregate(total=Sum("amount"))["total"] or Decimal("0")
-                if amount > budget.planned_total - committed:
-                    raise ValidationError({"amount": "Insufficient program budget for household payment"})
-                entitlement = CashEntitlement.objects.create(
-                    household=household,
-                    program=program,
-                    amount=amount,
-                    currency=program.currency,
-                    status=CashEntitlement.Status.ACTIVE,
-                    created_by=self.request.user,
-                )
-        else:
-            entitlement = CashEntitlement.objects.select_for_update().get(
-                pk=data["cash_entitlement"].pk
-            )
-            household = entitlement.household
-            program = Program.objects.select_for_update().get(pk=entitlement.program_id)
+        entitlement = CashEntitlement.objects.select_for_update().get(
+            pk=data["cash_entitlement"].pk
+        )
+        household = entitlement.household
+        program = Program.objects.select_for_update().get(pk=entitlement.program_id)
+        if not Budget.objects.select_for_update().filter(program=program).exists():
+            raise ValidationError({"program": "A program budget is required before creating a payment instruction"})
         channel = PaymentChannelConfig.objects.select_for_update().get(
             pk=data["channel_config"].pk
         )
@@ -830,12 +812,11 @@ class PaymentInstructionViewSet(RoleProtectedTenantViewSet):
             raise ValidationError({"cash_entitlement": "Cash entitlement belongs to another tenant"})
         if channel.program_id != program.id or not channel.is_active or channel.currency != program.currency:
             raise ValidationError({"channel_config": "An active channel with the program currency is required"})
-        if (
-            serializer.validated_data["amount"] != entitlement.amount
-            or serializer.validated_data["currency"] != entitlement.currency
-            or serializer.validated_data["currency"] != program.currency
-        ):
+        if entitlement.currency != program.currency or entitlement.currency != channel.currency:
             raise ValidationError({"amount": "Payment amount and currency must match the cash entitlement and program"})
+        financials = payment_budget_totals(program)
+        if channel.fee_amount > financials["remaining"]:
+            raise ValidationError({"channel_config": f"Insufficient budget for the transaction fee. Remaining: {financials['remaining']} {program.currency}."})
         if batch and (batch.tenant_id != program.tenant_id or batch.program_id != program.id):
             raise ValidationError({"batch": "Payment batch must belong to the entitlement program and tenant"})
         if not HouseholdEligibility.objects.select_for_update().filter(
@@ -859,7 +840,10 @@ class PaymentInstructionViewSet(RoleProtectedTenantViewSet):
             channel_config=channel,
             batch=batch,
             enrollment=None,
-            beneficiary=None if data.get("household") else entitlement.beneficiary,
+            beneficiary=entitlement.beneficiary,
+            amount=entitlement.amount,
+            currency=entitlement.currency,
+            applied_fee=channel.fee_amount,
             created_by=self.request.user,
             status=PaymentInstruction.Status.CREATED,
             idempotency_key=str(uuid.uuid4()),
@@ -869,7 +853,11 @@ class PaymentInstructionViewSet(RoleProtectedTenantViewSet):
             event_type=PaymentEvent.EventType.CREATED,
             to_status=PaymentInstruction.Status.CREATED,
             recorded_by=self.request.user,
-            redacted_payload={"simulation": True},
+            redacted_payload={
+                "simulation": True,
+                "fee_amount": str(channel.fee_amount),
+                "total_financial_impact": str(entitlement.amount + channel.fee_amount),
+            },
         )
         audit(
             self.request.user,
@@ -882,7 +870,10 @@ class PaymentInstructionViewSet(RoleProtectedTenantViewSet):
     @action(detail=True, methods=["post"])
     @transaction.atomic
     def simulate(self, request, pk=None):
-        instruction = self.get_object()
+        scoped = self.get_queryset().filter(pk=pk).values_list("pk", flat=True).first()
+        if not scoped:
+            raise ValidationError({"payment_instruction": "Payment instruction was not found"})
+        instruction = PaymentInstruction.objects.select_for_update().get(pk=scoped)
         outcome = request.data.get("outcome")
         transitions = {
             "submit": (PaymentInstruction.Status.SUBMITTED, PaymentEvent.EventType.SUBMITTED),
@@ -895,11 +886,23 @@ class PaymentInstructionViewSet(RoleProtectedTenantViewSet):
             raise ValidationError({"outcome": "Use submit, success, failure, retry, or reversal"})
         old_status = instruction.status
         new_status, event_type = transitions[outcome]
+        if outcome == "success" and old_status == PaymentInstruction.Status.SUCCESS:
+            raise ValidationError({"outcome": "This payment already succeeded; its fee cannot be charged twice"})
         if new_status == PaymentInstruction.Status.REVERSED and old_status not in {PaymentInstruction.Status.SUCCESS, PaymentInstruction.Status.FAILED}:
             raise ValidationError({"outcome": "Only success or failed instructions can be reversed"})
+        program = instruction.cash_entitlement.program
+        if not Budget.objects.select_for_update().filter(program=program).exists():
+            raise ValidationError({"outcome": "The payment program has no configured budget"})
+        if outcome == "success":
+            financials = payment_budget_totals(program)
+            if instruction.applied_fee > financials["remaining"]:
+                raise ValidationError({"outcome": f"Insufficient budget for the payment fee. Remaining: {financials['remaining']} {instruction.currency}."})
         instruction.status = new_status
         instruction.provider_reference = instruction.provider_reference or f"SIM-{str(instruction.id)[:8].upper()}"
         instruction.save(update_fields=["status", "provider_reference"])
+        if outcome == "success" and instruction.cash_entitlement.status == CashEntitlement.Status.ACTIVE:
+            instruction.cash_entitlement.status = CashEntitlement.Status.PAID
+            instruction.cash_entitlement.save(update_fields=["status", "updated_at"])
         event = PaymentEvent.objects.create(
             instruction=instruction,
             event_type=event_type,
@@ -908,7 +911,12 @@ class PaymentInstructionViewSet(RoleProtectedTenantViewSet):
             from_status=old_status,
             to_status=new_status,
             recorded_by=request.user,
-            redacted_payload={"simulation": True, "no_external_provider_call": True},
+            redacted_payload={
+                "simulation": True,
+                "no_external_provider_call": True,
+                "fee_amount": str(instruction.applied_fee),
+                "total_financial_impact": str(instruction.amount + instruction.applied_fee),
+            },
         )
         audit(
             request.user,
@@ -927,6 +935,59 @@ class PaymentInstructionViewSet(RoleProtectedTenantViewSet):
     @action(detail=True, methods=["get"])
     def events(self, request, pk=None):
         return Response(PaymentEventSerializer(self.get_object().events.all().order_by("created_at"), many=True).data)
+
+
+class PaymentDeliveryReviewViewSet(RoleProtectedTenantViewSet):
+    queryset = PaymentDeliveryReview.objects.select_related(
+        "payment_instruction__cash_entitlement__program",
+        "payment_instruction__cash_entitlement__household",
+        "payment_instruction__channel_config",
+        "household",
+        "program",
+        "reviewed_by",
+    )
+    serializer_class = PaymentDeliveryReviewSerializer
+    tenant_field = "program__tenant"
+    allowed_roles = {User.Role.ADMIN, User.Role.MANAGER, User.Role.REVIEWER, User.Role.FINANCE, User.Role.AUDITOR}
+    write_roles = {User.Role.ADMIN, User.Role.MANAGER, User.Role.REVIEWER}
+
+    def destroy(self, request, *args, **kwargs):
+        raise PermissionDenied("Payment delivery reviews are audit records and cannot be deleted")
+
+    @transaction.atomic
+    def perform_create(self, serializer):
+        instruction = PaymentInstruction.objects.select_for_update().get(
+            pk=serializer.validated_data["payment_instruction"].pk
+        )
+        if not instruction.cash_entitlement_id:
+            raise ValidationError({"payment_instruction": "A household cash entitlement is required"})
+        entitlement = instruction.cash_entitlement
+        if not self.request.user.is_superuser and entitlement.program.tenant_id != self.request.user.tenant_id:
+            raise ValidationError({"payment_instruction": "Payment belongs to another tenant"})
+        review = serializer.save(
+            payment_instruction=instruction,
+            household=entitlement.household,
+            program=entitlement.program,
+            reviewed_by=self.request.user,
+            reviewed_at=timezone.now(),
+        )
+        audit(self.request.user, "PAYMENT_DELIVERY_REVIEW_CREATED", review, after=self.get_serializer(review).data, tenant=entitlement.program.tenant)
+
+    @transaction.atomic
+    def perform_update(self, serializer):
+        current = PaymentDeliveryReview.objects.select_for_update().select_related("program__tenant").get(pk=serializer.instance.pk)
+        requested_instruction = serializer.validated_data.get("payment_instruction", current.payment_instruction)
+        if requested_instruction.pk != current.payment_instruction_id:
+            raise ValidationError({"payment_instruction": "The reviewed payment cannot be changed"})
+        before = self.get_serializer(current).data
+        review = serializer.save(
+            payment_instruction=current.payment_instruction,
+            household=current.household,
+            program=current.program,
+            reviewed_by=self.request.user,
+            reviewed_at=timezone.now(),
+        )
+        audit(self.request.user, "PAYMENT_DELIVERY_REVIEW_UPDATED", review, before=before, after=self.get_serializer(review).data, tenant=current.program.tenant)
 
 
 class ComplaintViewSet(RoleProtectedTenantViewSet):
@@ -1245,18 +1306,33 @@ def program_summary_view(request, program_id):
     complaints = Complaint.objects.filter(beneficiary__household__program=program)
     reconciliation = ReconciliationItem.objects.filter(program=program)
     budget = getattr(program, "budget", None)
+    financials = payment_budget_totals(program)
+    entitlements = CashEntitlement.objects.filter(program=program)
     return Response({
         "program": {"id": str(program.id), "name": program.name, "tenant_id": str(program.tenant_id), "tenant_name": program.tenant.name, "country_code": program.country_code, "currency": program.currency, "reporting_currency": program.reporting_currency, "timezone": program.timezone, "language": program.language},
         "beneficiaries": Beneficiary.objects.filter(household__program=program).count(),
         "eligibility": list(enrollments.values("eligibility_status").annotate(count=Count("id")).order_by("eligibility_status")),
         "approvals": enrollments.filter(status=Enrollment.Status.APPROVED).count(),
         "payments": list(payments.values("status").annotate(count=Count("id"), amount=Sum("amount")).order_by("status")),
-        "amounts": {"approved": str((program.transfer_amount or Decimal("0")) * enrollments.filter(status=Enrollment.Status.APPROVED).count()), "distributed": str(payments.filter(status=PaymentInstruction.Status.SUCCESS).aggregate(total=Sum("amount"))["total"] or 0)},
+        "amounts": {
+            "entitled": str(entitlements.filter(status__in=[CashEntitlement.Status.ACTIVE, CashEntitlement.Status.PAID]).aggregate(total=Sum("amount"))["total"] or 0),
+            "distributed": str(financials["funding"]),
+            "fees": str(financials["fees"]),
+            "total_budget_used": str(financials["used"]),
+        },
         "failures": payments.filter(status=PaymentInstruction.Status.FAILED).count(),
         "reconciliation": list(reconciliation.values("issue_type", "status").annotate(count=Count("id")).order_by("issue_type")),
         "pdm": {"summary_source": "derived_api"},
         "complaints": list(complaints.values("status", "severity").annotate(count=Count("id")).order_by("status")),
-        "budget": {"planned_total": str(budget.planned_total), "actual_total": str(budget.actual_total), "remaining": str(budget.planned_total - budget.actual_total), "status": budget.status} if budget else None,
+        "budget": {
+            "budget_amount": str(financials["budget_amount"]),
+            "committed_amount": str(financials["committed"]),
+            "successful_funding": str(financials["funding"]),
+            "successful_fees": str(financials["fees"]),
+            "used_amount": str(financials["used"]),
+            "remaining_amount": str(financials["remaining"]),
+            "status": budget.status,
+        } if budget else None,
         "verified": True,
     })
 
@@ -1381,7 +1457,12 @@ def pdm_program_metrics(program, responses=None):
         Q(cash_entitlement__program=program) | Q(enrollment__program=program),
         status=PaymentInstruction.Status.SUCCESS,
     )
-    paid_beneficiaries = successful_payments.values("beneficiary_id").distinct().count()
+    paid_beneficiaries = (
+        successful_payments.filter(cash_entitlement__isnull=False)
+        .values("cash_entitlement__household_id").distinct().count()
+        + successful_payments.filter(cash_entitlement__isnull=True, beneficiary__isnull=False)
+        .values("beneficiary_id").distinct().count()
+    )
     distributed_amount = successful_payments.aggregate(total=Sum("amount"))["total"] or Decimal("0")
     recorded_recipients = (responses or PDMResponse.objects.filter(program=program)).aggregate(total=Sum("received_count"))["total"] or 0
     complaints = Complaint.objects.filter(beneficiary__household__program=program).count()
@@ -1480,7 +1561,12 @@ def pdm_summary_view(request):
         Q(cash_entitlement__program__in=summary_programs) | Q(enrollment__program__in=summary_programs),
         status=PaymentInstruction.Status.SUCCESS,
     )
-    paid_beneficiaries = successful_payments.values("beneficiary_id").distinct().count()
+    paid_beneficiaries = (
+        successful_payments.filter(cash_entitlement__isnull=False)
+        .values("cash_entitlement__household_id").distinct().count()
+        + successful_payments.filter(cash_entitlement__isnull=True, beneficiary__isnull=False)
+        .values("beneficiary_id").distinct().count()
+    )
     distributed_amount = successful_payments.aggregate(total=Sum("amount"))["total"] or Decimal("0")
     complaints = Complaint.objects.filter(beneficiary__household__program__in=summary_programs).count()
     totals = responses.aggregate(received_count=Sum("received_count"), amount_received=Sum("amount_received"), access_problem_rate=Sum("access_problem_rate"), satisfaction=Sum("satisfaction"), count=Count("id"))
@@ -1500,6 +1586,31 @@ def pdm_summary_view(request):
     nfi_allocated = StockMovement.objects.filter(program__in=summary_programs, movement_type=StockMovement.MovementType.ALLOCATION).aggregate(total=Sum("quantity"))["total"] or 0
     warehouse_stock = list(NFIItem.objects.filter(program__in=summary_programs).values("warehouse_id", "warehouse__name", "warehouse__location").annotate(initial_quantity=Sum("initial_quantity"), available_quantity=Sum("available_quantity")).order_by("warehouse__name"))
     delivery_exceptions = nfi_issues.exclude(delivery_status=DistributionIssue.DeliveryStatus.RECEIVED).count()
+    program_financials = [payment_budget_totals(program) for program in summary_programs]
+    budget_amount = sum((item["budget_amount"] for item in program_financials), Decimal("0"))
+    committed_amount = sum((item["committed"] for item in program_financials), Decimal("0"))
+    successful_fees = sum((item["fees"] for item in program_financials), Decimal("0"))
+    used_amount = sum((item["used"] for item in program_financials), Decimal("0"))
+    remaining_amount = sum((item["remaining"] for item in program_financials), Decimal("0"))
+    scoped_payments = PaymentInstruction.objects.filter(
+        Q(cash_entitlement__program__in=summary_programs) | Q(enrollment__program__in=summary_programs)
+    ).select_related("cash_entitlement__household", "cash_entitlement__program", "channel_config")
+    payment_reviews = PaymentDeliveryReview.objects.filter(program__in=summary_programs)
+    payment_transactions = [
+        {
+            "id": str(payment.id),
+            "household": payment.cash_entitlement.household.registration_reference or str(payment.cash_entitlement.household_id),
+            "program": payment.cash_entitlement.program.name,
+            "amount": str(payment.amount),
+            "fee": str(payment.applied_fee),
+            "total_impact": str(payment.amount + payment.applied_fee),
+            "currency": payment.currency,
+            "status": payment.status,
+            "channel": payment.channel_config.provider_name,
+        }
+        for payment in scoped_payments
+        if payment.cash_entitlement_id
+    ]
     return Response({
         "program": {"id": str(selected_program.id), "name": selected_program.name} if selected_program else None,
         "tenant": {"id": str(selected_tenant.id), "name": selected_tenant.name} if selected_tenant else None,
@@ -1509,6 +1620,21 @@ def pdm_summary_view(request):
         "recorded_recipients": recorded_recipients,
         "remaining_recipients": max(paid_beneficiaries - recorded_recipients, 0),
         "distributed_amount": str(distributed_amount),
+        "budget_amount": str(budget_amount),
+        "total_payment_entitlements": CashEntitlement.objects.filter(program__in=summary_programs).count(),
+        "committed_payment_amount": str(committed_amount),
+        "successful_payment_funding": str(distributed_amount),
+        "successful_fees": str(successful_fees),
+        "budget_used": str(used_amount),
+        "budget_remaining": str(remaining_amount),
+        "successful_transactions": scoped_payments.filter(status=PaymentInstruction.Status.SUCCESS).count(),
+        "failed_transactions": scoped_payments.filter(status=PaymentInstruction.Status.FAILED).count(),
+        "pending_transactions": scoped_payments.filter(status__in=[PaymentInstruction.Status.CREATED, PaymentInstruction.Status.SUBMITTED]).count(),
+        "payment_delivery_reviews": payment_reviews.count(),
+        "payments_received": payment_reviews.filter(delivery_status=PaymentDeliveryReview.DeliveryStatus.RECEIVED).count(),
+        "payments_partially_received": payment_reviews.filter(delivery_status=PaymentDeliveryReview.DeliveryStatus.PARTIALLY_RECEIVED).count(),
+        "payments_not_received": payment_reviews.filter(delivery_status=PaymentDeliveryReview.DeliveryStatus.NOT_RECEIVED).count(),
+        "payment_transactions": payment_transactions,
         "complaints": complaints,
         "received_rate": float(Decimal(recorded_recipients) * Decimal("100") / Decimal(paid_beneficiaries)) if paid_beneficiaries else 0,
         "amount_received": str(totals["amount_received"] or 0),
@@ -1650,7 +1776,7 @@ def trigger_reconciliation_api(request):
     
     batches = PaymentBatch.objects.all() if request.user.is_superuser else PaymentBatch.objects.filter(tenant=request.user.tenant)
     batch = get_object_or_404(batches, id=batch_id)
-    results = run_automated_reconciliation(batch, provider_report_data)
+    results = run_automated_reconciliation(batch.id, provider_report_data)
     return Response({
         "status": "success",
         "batch_id": batch_id,
@@ -1670,11 +1796,18 @@ def trigger_anomaly_detection_api(request):
     batch_id = request.data.get("batch_id")
     batches = PaymentBatch.objects.all() if request.user.is_superuser else PaymentBatch.objects.filter(tenant=request.user.tenant)
     batch = get_object_or_404(batches, id=batch_id)
-    signals = run_anomaly_detection(batch)
+    anomalies_detected = run_anomaly_detection(batch)
+    signals = AISignal.objects.filter(
+        tenant=batch.tenant,
+        program=batch.program,
+        entity_type="PAYMENT_INSTRUCTION",
+        entity_id__in=[str(value) for value in batch.instructions.values_list("id", flat=True)],
+        signal_type="PAYMENT_ANOMALY",
+    ).order_by("created_at")
     return Response({
         "status": "completed",
         "batch_id": batch_id,
-        "anomalies_detected": len(signals),
+        "anomalies_detected": anomalies_detected,
         "signals": AISignalSerializer(signals, many=True).data,
         "advisory_only": True,
     }, status=status.HTTP_200_OK)
@@ -1897,6 +2030,8 @@ class CashEntitlementViewSet(RoleProtectedTenantViewSet):
     def _save_with_budget_check(self, serializer, creating):
         program = serializer.validated_data.get("program", serializer.instance.program if serializer.instance else None)
         household = serializer.validated_data.get("household", serializer.instance.household if serializer.instance else None)
+        if not creating:
+            serializer.instance = CashEntitlement.objects.select_for_update().get(pk=serializer.instance.pk)
         budget = Budget.objects.select_for_update().filter(program=program).first()
         if not budget:
             raise ValidationError({"program": "A program budget is required before creating a cash entitlement."})
@@ -1908,16 +2043,36 @@ class CashEntitlementViewSet(RoleProtectedTenantViewSet):
         if not creating:
             committed = committed.exclude(pk=serializer.instance.pk)
         committed_total = committed.aggregate(total=Sum("amount"))["total"] or Decimal("0")
-        if serializer.validated_data.get("status", CashEntitlement.Status.ACTIVE) == CashEntitlement.Status.CANCELLED:
+        successful_payment = PaymentInstruction.objects.select_for_update().filter(
+            cash_entitlement=serializer.instance,
+            status=PaymentInstruction.Status.SUCCESS,
+        ).first() if not creating else None
+        requested_status = serializer.validated_data.get(
+            "status",
+            serializer.instance.status if serializer.instance else CashEntitlement.Status.ACTIVE,
+        )
+        if successful_payment and (
+            requested != serializer.instance.amount or requested_status == CashEntitlement.Status.CANCELLED
+        ):
+            raise ValidationError({"amount": "A successfully paid entitlement amount and reservation cannot be changed or cancelled"})
+        if requested_status == CashEntitlement.Status.CANCELLED:
             requested = Decimal("0")
-        available = budget.planned_total - committed_total
+        successful_fees = PaymentInstruction.objects.select_for_update().filter(
+            cash_entitlement__program=program,
+            status=PaymentInstruction.Status.SUCCESS,
+        ).aggregate(total=Sum("applied_fee"))["total"] or Decimal("0")
+        available = budget.planned_total - committed_total - successful_fees
         if requested > available:
             raise ValidationError({"amount": f"Insufficient program budget. Available: {available} {budget.currency}; requested: {requested} {budget.currency}."})
         before = self.get_serializer(serializer.instance).data if serializer.instance else None
         instance = serializer.save(created_by=self.request.user) if creating else serializer.save()
         audit(
             self.request.user,
-            "HOUSEHOLD_CASH_ENTITLEMENT_CREATED" if creating else "HOUSEHOLD_CASH_ENTITLEMENT_UPDATED",
+            "HOUSEHOLD_CASH_ENTITLEMENT_CREATED" if creating else (
+                "HOUSEHOLD_CASH_ENTITLEMENT_CANCELLED"
+                if instance.status == CashEntitlement.Status.CANCELLED
+                else "HOUSEHOLD_CASH_ENTITLEMENT_UPDATED"
+            ),
             instance,
             before=before,
             after={**self.get_serializer(instance).data, "budget": str(budget.planned_total), "committed": str(committed_total + requested), "remaining": str(available - requested)},

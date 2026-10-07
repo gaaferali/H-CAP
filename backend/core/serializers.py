@@ -30,6 +30,7 @@ from .models import (
     User,
     HouseholdEligibility, HouseholdEnrollment, CashEntitlement, Warehouse, NFIItem,
     NFIEntitlement, StockMovement, DistributionEvent, DistributionAllocation, DistributionIssue,
+    PaymentDeliveryReview,
 )
 
 
@@ -159,15 +160,13 @@ class ProgramSerializer(serializers.ModelSerializer):
 
     def validate(self, attrs):
         cash_enabled = attrs.get("cash_enabled", self.instance.cash_enabled if self.instance else True)
-        transfer_amount = attrs.get("transfer_amount", self.instance.transfer_amount if self.instance else None)
         payment_cycle = attrs.get("payment_cycle", self.instance.payment_cycle if self.instance else "")
         if cash_enabled:
-            if transfer_amount is None:
-                raise serializers.ValidationError({"transfer_amount": "Transfer amount is required when Payment/Cash is enabled."})
-            if transfer_amount < Decimal("0.01"):
-                raise serializers.ValidationError({"transfer_amount": "Transfer amount must be at least 0.01 when Payment/Cash is enabled."})
             if not payment_cycle:
                 raise serializers.ValidationError({"payment_cycle": "Payment cycle is required when Payment/Cash is enabled."})
+            # Household payment amounts belong to CashEntitlement. Keep the
+            # legacy program field nullable for existing records only.
+            attrs["transfer_amount"] = None
         else:
             # Cash fields are deliberately cleared when Cash is disabled, so an
             # NFI-only program cannot carry a misleading transfer configuration.
@@ -284,6 +283,9 @@ class CashEntitlementSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError("Program belongs to another tenant")
         if not program.cash_enabled:
             raise serializers.ValidationError({"program": "Cash assistance is disabled for this program"})
+        currency = attrs.get("currency", getattr(self.instance, "currency", None))
+        if currency != program.currency:
+            raise serializers.ValidationError({"currency": "Entitlement currency must match the program currency"})
         if not approved_household_modality(
             household,
             program,
@@ -314,7 +316,11 @@ class CashEntitlementSerializer(serializers.ModelSerializer):
         return CashEntitlement.objects.filter(program=obj.program, status__in=[CashEntitlement.Status.ACTIVE, CashEntitlement.Status.PAID]).aggregate(total=Sum("amount"))["total"] or 0
 
     def get_budget_remaining(self, obj):
-        return (self.get_budget_total(obj) or 0) - (self.get_budget_committed(obj) or 0)
+        successful_fees = PaymentInstruction.objects.filter(
+            cash_entitlement__program=obj.program,
+            status=PaymentInstruction.Status.SUCCESS,
+        ).aggregate(total=Sum("applied_fee"))["total"] or 0
+        return (self.get_budget_total(obj) or 0) - (self.get_budget_committed(obj) or 0) - successful_fees
 
 
 class WarehouseSerializer(serializers.ModelSerializer):
@@ -787,6 +793,18 @@ class PaymentChannelConfigSerializer(serializers.ModelSerializer):
         model = PaymentChannelConfig
         fields = "__all__"
 
+    def validate(self, attrs):
+        program = attrs.get("program") or self.instance.program
+        currency = attrs.get("currency", self.instance.currency if self.instance else None)
+        if not program.cash_enabled:
+            raise serializers.ValidationError({"program": "Payment channels require a payment-enabled program"})
+        if currency != program.currency:
+            raise serializers.ValidationError({"currency": "Channel currency must match the program currency"})
+        user = self.context["request"].user
+        if not user.is_superuser and program.tenant_id != user.tenant_id:
+            raise serializers.ValidationError("Program belongs to another tenant")
+        return attrs
+
 
 class PaymentInstructionSerializer(serializers.ModelSerializer):
     beneficiary_name = serializers.SerializerMethodField()
@@ -801,11 +819,13 @@ class PaymentInstructionSerializer(serializers.ModelSerializer):
         required=False,
     )
     channel_name = serializers.CharField(source="channel_config.provider_name", read_only=True)
+    fee_amount = serializers.DecimalField(source="applied_fee", max_digits=18, decimal_places=2, read_only=True)
+    total_financial_impact = serializers.SerializerMethodField()
 
     class Meta:
         model = PaymentInstruction
         fields = "__all__"
-        read_only_fields = ["created_by", "created_at", "status", "provider_reference", "idempotency_key"]
+        read_only_fields = ["created_by", "created_at", "status", "provider_reference", "idempotency_key", "amount", "currency", "applied_fee"]
 
     def validate(self, attrs):
         entitlement = attrs.get("cash_entitlement")
@@ -836,8 +856,6 @@ class PaymentInstructionSerializer(serializers.ModelSerializer):
             )
         channel_config = attrs.get("channel_config", getattr(self.instance, "channel_config", None))
         batch = attrs.get("batch", getattr(self.instance, "batch", None))
-        amount = attrs.get("amount", getattr(self.instance, "amount", None))
-        currency = attrs.get("currency", getattr(self.instance, "currency", None))
         beneficiary = attrs.get("beneficiary")
         if entitlement and beneficiary and beneficiary.pk != entitlement.beneficiary_id:
             raise serializers.ValidationError({"beneficiary": "Beneficiary must match the household cash entitlement"})
@@ -865,31 +883,23 @@ class PaymentInstructionSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError({"household": "Payment instruction requires an approved household cash enrollment"})
         if not channel_config or channel_config.program_id != program.id or not channel_config.is_active:
             raise serializers.ValidationError({"channel_config": "An active payment channel must belong to the program"})
-        if entitlement:
-            expected_amount, expected_currency = entitlement.amount, entitlement.currency
-        else:
-            existing_entitlement = CashEntitlement.objects.filter(
+        if not entitlement:
+            entitlement = CashEntitlement.objects.filter(
                 household=household,
                 program=program,
                 status=CashEntitlement.Status.ACTIVE,
             ).order_by("created_at").first()
-            if existing_entitlement:
-                if "cash_entitlement" in attrs and attrs["cash_entitlement"].pk != existing_entitlement.pk:
-                    raise serializers.ValidationError(
-                        {"cash_entitlement": "Cash entitlement must belong to the selected household"}
-                    )
-                entitlement = existing_entitlement
-                attrs["cash_entitlement"] = existing_entitlement
-                expected_amount, expected_currency = existing_entitlement.amount, existing_entitlement.currency
-            else:
-                expected_amount, expected_currency = program.transfer_amount, program.currency
-        if expected_amount is None:
-            raise serializers.ValidationError(
-                {"amount": "Program transfer amount is required for household payment"}
-            )
-        if amount != expected_amount:
-            raise serializers.ValidationError({"amount": "Payment amount must match the household cash entitlement or program transfer amount"})
-        if currency != expected_currency or currency != program.currency or currency != channel_config.currency:
+            if entitlement:
+                attrs["cash_entitlement"] = entitlement
+        if not entitlement:
+            raise serializers.ValidationError({"cash_entitlement": "An active household payment entitlement is required"})
+        submitted_amount = self.initial_data.get("amount")
+        if submitted_amount not in {None, ""} and Decimal(str(submitted_amount)) != entitlement.amount:
+            raise serializers.ValidationError({"amount": "Payment amount must match the household cash entitlement"})
+        submitted_currency = self.initial_data.get("currency")
+        if submitted_currency not in {None, ""} and submitted_currency != entitlement.currency:
+            raise serializers.ValidationError({"currency": "Payment currency must match the household cash entitlement"})
+        if entitlement.currency != program.currency or entitlement.currency != channel_config.currency:
             raise serializers.ValidationError({"currency": "Payment, program, and channel currencies must match"})
         if batch and (batch.tenant_id != program.tenant_id or batch.program_id != program.id):
             raise serializers.ValidationError({"batch": "Payment batch must belong to the program and tenant"})
@@ -934,11 +944,83 @@ class PaymentInstructionSerializer(serializers.ModelSerializer):
     def get_household_members(self, instruction):
         return household_member_details(self.get_household(instruction))
 
+    def get_total_financial_impact(self, instruction):
+        return instruction.amount + instruction.applied_fee
+
 
 class PaymentEventSerializer(serializers.ModelSerializer):
+    action = serializers.CharField(source="event_type", read_only=True)
+    actor_name = serializers.CharField(source="recorded_by.full_name", read_only=True)
+    household_reference = serializers.SerializerMethodField()
+    household_size = serializers.SerializerMethodField()
+    household_members = serializers.SerializerMethodField()
+    program_name = serializers.CharField(source="instruction.cash_entitlement.program.name", read_only=True)
+    payment_amount = serializers.DecimalField(source="instruction.amount", max_digits=18, decimal_places=2, read_only=True)
+    fee_amount = serializers.DecimalField(source="instruction.applied_fee", max_digits=18, decimal_places=2, read_only=True)
+    total_financial_impact = serializers.SerializerMethodField()
+
     class Meta:
         model = PaymentEvent
         fields = "__all__"
+
+    def get_household(self, event):
+        return event.instruction.cash_entitlement.household if event.instruction.cash_entitlement_id else None
+
+    def get_household_reference(self, event):
+        return household_reference(self.get_household(event))
+
+    def get_household_size(self, event):
+        household = self.get_household(event)
+        return household.household_size if household else None
+
+    def get_household_members(self, event):
+        return household_member_details(self.get_household(event))
+
+    def get_total_financial_impact(self, event):
+        return event.instruction.amount + event.instruction.applied_fee
+
+
+class PaymentDeliveryReviewSerializer(serializers.ModelSerializer):
+    household_reference = serializers.SerializerMethodField()
+    household_size = serializers.IntegerField(source="household.household_size", read_only=True)
+    household_members = serializers.SerializerMethodField()
+    program_name = serializers.CharField(source="program.name", read_only=True)
+    reviewer_name = serializers.CharField(source="reviewed_by.full_name", read_only=True)
+    payment_amount = serializers.DecimalField(source="payment_instruction.amount", max_digits=18, decimal_places=2, read_only=True)
+    fee_amount = serializers.DecimalField(source="payment_instruction.applied_fee", max_digits=18, decimal_places=2, read_only=True)
+    total_financial_impact = serializers.SerializerMethodField()
+    channel_name = serializers.CharField(source="payment_instruction.channel_config.provider_name", read_only=True)
+    payment_status = serializers.CharField(source="payment_instruction.status", read_only=True)
+    provider_reference = serializers.CharField(source="payment_instruction.provider_reference", read_only=True)
+
+    class Meta:
+        model = PaymentDeliveryReview
+        fields = "__all__"
+        read_only_fields = ["household", "program", "reviewed_by", "reviewed_at", "created_at", "updated_at"]
+
+    def validate_payment_instruction(self, instruction):
+        if not instruction.cash_entitlement_id:
+            raise serializers.ValidationError("Payment delivery review requires a household cash entitlement")
+        if instruction.status not in {
+            PaymentInstruction.Status.SUCCESS,
+            PaymentInstruction.Status.FAILED,
+            PaymentInstruction.Status.REVERSED,
+        }:
+            raise serializers.ValidationError("Only completed payment attempts can be reviewed")
+        user = self.context["request"].user
+        program = instruction.cash_entitlement.program
+        if not user.is_superuser and program.tenant_id != user.tenant_id:
+            raise serializers.ValidationError("Payment belongs to another tenant")
+        return instruction
+
+    def get_household_reference(self, review):
+        return household_reference(review.household)
+
+    def get_household_members(self, review):
+        return household_member_details(review.household)
+
+    def get_total_financial_impact(self, review):
+        return review.payment_instruction.amount + review.payment_instruction.applied_fee
 
 
 class PaymentBatchSerializer(serializers.ModelSerializer):
@@ -1047,9 +1129,38 @@ class ComplaintAIAnalysisSerializer(serializers.ModelSerializer):
 
 class BudgetSerializer(serializers.ModelSerializer):
     program_name = serializers.CharField(source="program.name", read_only=True)
+    used_amount = serializers.SerializerMethodField()
+    remaining_amount = serializers.SerializerMethodField()
+    committed_amount = serializers.SerializerMethodField()
+    successful_funding = serializers.SerializerMethodField()
+    successful_fees = serializers.SerializerMethodField()
     class Meta:
         model = Budget
         fields = "__all__"
+        read_only_fields = ["actual_total", "created_at"]
+
+    def financials(self, budget):
+        committed = CashEntitlement.objects.filter(program=budget.program, status__in=[CashEntitlement.Status.ACTIVE, CashEntitlement.Status.PAID]).aggregate(total=Sum("amount"))["total"] or Decimal("0")
+        successful = PaymentInstruction.objects.filter(cash_entitlement__program=budget.program, status=PaymentInstruction.Status.SUCCESS)
+        funding = successful.aggregate(total=Sum("amount"))["total"] or Decimal("0")
+        fees = successful.aggregate(total=Sum("applied_fee"))["total"] or Decimal("0")
+        return committed, funding, fees
+
+    def get_committed_amount(self, budget):
+        return self.financials(budget)[0]
+
+    def get_successful_funding(self, budget):
+        return self.financials(budget)[1]
+
+    def get_successful_fees(self, budget):
+        return self.financials(budget)[2]
+
+    def get_used_amount(self, budget):
+        committed, _funding, fees = self.financials(budget)
+        return committed + fees
+
+    def get_remaining_amount(self, budget):
+        return budget.planned_total - self.get_used_amount(budget)
 
     def validate_line_items(self, value):
         if not isinstance(value, list):
@@ -1063,9 +1174,26 @@ class BudgetSerializer(serializers.ModelSerializer):
         return value
 
     def validate_program(self, program):
-        if program.tenant_id != self.context["request"].user.tenant_id:
+        user = self.context["request"].user
+        if not user.is_superuser and program.tenant_id != user.tenant_id:
             raise serializers.ValidationError("Program belongs to another tenant")
+        if not program.cash_enabled:
+            raise serializers.ValidationError("A payment budget requires a payment-enabled program")
         return program
+
+    def validate(self, attrs):
+        program = attrs.get("program") or getattr(self.instance, "program", None)
+        currency = attrs.get("currency", getattr(self.instance, "currency", None))
+        planned_total = attrs.get("planned_total", getattr(self.instance, "planned_total", Decimal("0")))
+        if program and currency != program.currency:
+            raise serializers.ValidationError({"currency": "Budget currency must match the program currency"})
+        if program:
+            source = self.instance or type("BudgetProgram", (), {"program": program})()
+            committed, _funding, fees = self.financials(source)
+            if planned_total < committed + fees:
+                raise serializers.ValidationError({"planned_total": "Budget amount cannot be below current commitments and successful fees"})
+        attrs.pop("actual_total", None)
+        return attrs
 
 
 class AuditEventSerializer(serializers.ModelSerializer):

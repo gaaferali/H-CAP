@@ -24,6 +24,7 @@ from .models import (
     PaymentChannelConfig,
     PaymentBatch,
     PaymentEvent,
+    PaymentDeliveryReview,
     PaymentInstruction,
     Budget,
     Program,
@@ -489,6 +490,52 @@ class PaymentInstructionWorkflowTests(TestCase):
         )
         self.assertEqual(duplicate.status_code, 400, duplicate.data)
 
+    def test_success_snapshots_and_charges_channel_fee_once(self):
+        self.channel.fee_amount = Decimal("2.50")
+        self.channel.save(update_fields=["fee_amount"])
+        self.client.force_authenticate(self.finance)
+        created = self.client.post("/api/payment-instructions/", self.instruction_payload(), format="json")
+        self.assertEqual(created.status_code, 201, created.data)
+        self.assertEqual(Decimal(created.data["fee_amount"]), Decimal("2.50"))
+        instruction_id = created.data["id"]
+
+        succeeded = self.client.post(f"/api/payment-instructions/{instruction_id}/simulate/", {"outcome": "success"}, format="json")
+        duplicate = self.client.post(f"/api/payment-instructions/{instruction_id}/simulate/", {"outcome": "success"}, format="json")
+        budget = self.client.get(f"/api/budgets/{self.budget.id}/")
+
+        self.assertEqual(succeeded.status_code, 200, succeeded.data)
+        self.assertEqual(duplicate.status_code, 400, duplicate.data)
+        self.assertEqual(Decimal(budget.data["successful_fees"]), Decimal("2.50"))
+        self.assertEqual(Decimal(budget.data["used_amount"]), Decimal("52.50"))
+        events = self.client.get(f"/api/payment-instructions/{instruction_id}/events/")
+        self.assertEqual(events.data[-1]["actor_name"], self.finance.full_name)
+        self.assertEqual(events.data[-1]["household_reference"], created.data["household_reference"])
+
+    def test_failed_payment_does_not_consume_fee(self):
+        self.channel.fee_amount = Decimal("3.00")
+        self.channel.save(update_fields=["fee_amount"])
+        self.client.force_authenticate(self.finance)
+        created = self.client.post("/api/payment-instructions/", self.instruction_payload(), format="json")
+        failed = self.client.post(f"/api/payment-instructions/{created.data['id']}/simulate/", {"outcome": "failure"}, format="json")
+        budget = self.client.get(f"/api/budgets/{self.budget.id}/")
+        self.assertEqual(failed.status_code, 200, failed.data)
+        self.assertEqual(Decimal(budget.data["successful_fees"]), Decimal("0"))
+        self.assertEqual(Decimal(budget.data["used_amount"]), Decimal("50.00"))
+
+    def test_reviewer_records_payment_delivery_review_and_finance_is_read_only(self):
+        self.client.force_authenticate(self.finance)
+        created = self.client.post("/api/payment-instructions/", self.instruction_payload(), format="json")
+        self.client.post(f"/api/payment-instructions/{created.data['id']}/simulate/", {"outcome": "success"}, format="json")
+        self.client.force_authenticate(self.reviewer)
+        review = self.client.post("/api/payment-delivery-reviews/", {"payment_instruction": created.data["id"], "delivery_status": "RECEIVED", "note": "Confirmed by household"}, format="json")
+        self.assertEqual(review.status_code, 201, review.data)
+        self.assertEqual(review.data["household_reference"], created.data["household_reference"])
+        self.assertEqual(review.data["reviewer_name"], self.reviewer.full_name)
+        self.assertEqual(PaymentDeliveryReview.objects.count(), 1)
+        self.client.force_authenticate(self.finance)
+        denied = self.client.patch(f"/api/payment-delivery-reviews/{review.data['id']}/", {"delivery_status": "NOT_RECEIVED"}, format="json")
+        self.assertEqual(denied.status_code, 403, denied.data)
+
     def test_payment_instruction_remains_household_level_without_beneficiary_assignment(self):
         self.entitlement.beneficiary = None
         self.entitlement.save(update_fields=["beneficiary"])
@@ -553,10 +600,18 @@ class PaymentInstructionWorkflowTests(TestCase):
 
         created_instructions = []
         for household in (self.household, cash_nfi_household):
+            entitlement = self.entitlement if household == self.household else CashEntitlement.objects.create(
+                household=household,
+                program=self.program,
+                amount="50.00",
+                currency="USD",
+                created_by=self.finance,
+            )
             response = self.client.post(
                 "/api/payment-instructions/",
                 {
                     "household": str(household.id),
+                    "cash_entitlement": str(entitlement.id),
                     "channel_config": str(self.channel.id),
                     "amount": "50.00",
                     "currency": "USD",
@@ -566,7 +621,7 @@ class PaymentInstructionWorkflowTests(TestCase):
             self.assertEqual(response.status_code, 201, response.data)
             instruction = PaymentInstruction.objects.get(pk=response.data["id"])
             self.assertEqual(instruction.cash_entitlement.household, household)
-            self.assertIsNone(instruction.beneficiary)
+            self.assertEqual(instruction.beneficiary, entitlement.beneficiary)
             self.assertIsNone(instruction.enrollment)
             self.assertEqual(instruction.amount, Decimal("50.00"))
             self.assertEqual(instruction.currency, self.program.currency)
@@ -1471,14 +1526,13 @@ class ProgramConditionalModalityTests(TestCase):
         self.assertIsNone(program.transfer_amount)
         self.assertEqual(program.payment_cycle, "")
 
-    def test_cash_enabled_program_requires_valid_cash_fields(self):
+    def test_cash_enabled_program_requires_cycle_but_not_program_transfer_amount(self):
         missing = self.client.post("/api/programs/", self.payload(name="Missing cash", cash_enabled=True), format="json")
         self.assertEqual(missing.status_code, 400)
-        self.assertIn("transfer_amount", missing.data["error"]["fields"])
-        below_minimum = self.client.post("/api/programs/", self.payload(name="Small cash", cash_enabled=True, transfer_amount="0", payment_cycle="ONE_TIME"), format="json")
-        self.assertEqual(below_minimum.status_code, 400)
-        valid = self.client.post("/api/programs/", self.payload(name="Cash and NFI", cash_enabled=True, transfer_amount="100.00", payment_cycle="ONE_TIME"), format="json")
+        self.assertIn("payment_cycle", missing.data["error"]["fields"])
+        valid = self.client.post("/api/programs/", self.payload(name="Cash and NFI", cash_enabled=True, payment_cycle="ONE_TIME"), format="json")
         self.assertEqual(valid.status_code, 201, valid.data)
+        self.assertIsNone(valid.data["transfer_amount"])
 
     def test_switching_cash_off_clears_cash_fields(self):
         program = Program.objects.create(tenant=self.tenant, name="Existing cash", country="Sudan", currency="USD", transfer_amount="50.00", payment_cycle=Program.Cycle.MONTHLY, cash_enabled=True, created_by=self.manager)
