@@ -3,6 +3,7 @@ import io
 import json
 import uuid
 from decimal import Decimal, ROUND_HALF_UP
+from hashlib import sha256
 
 from django.core import signing
 from django.core.exceptions import ValidationError as DjangoValidationError

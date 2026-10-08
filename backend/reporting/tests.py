@@ -439,6 +439,26 @@ class PaymentInstructionWorkflowTests(TestCase):
         payload.update(overrides)
         return payload
 
+    def test_payment_screen_can_create_its_internal_budget_reservation(self):
+        self.entitlement.delete()
+        self.client.force_authenticate(self.finance)
+
+        response = self.client.post(
+            "/api/payment-instructions/",
+            {
+                "household": str(self.household.id),
+                "channel_config": str(self.channel.id),
+                "amount": "75.00",
+                "currency": "USD",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 201, response.data)
+        reservation = CashEntitlement.objects.get(id=response.data["cash_entitlement"])
+        self.assertEqual(reservation.household, self.household)
+        self.assertEqual(str(reservation.amount), "75.00")
+
     def test_new_instruction_uses_household_entitlement_and_exact_amount(self):
         self.client.force_authenticate(self.finance)
         response = self.client.post(
