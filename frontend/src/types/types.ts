@@ -1,0 +1,30 @@
+export type Role = "ADMIN" | "FIELD_OFFICER" | "FINANCE" | "REVIEWER" | "SUPPORT" | "MANAGER" | "AUDITOR";
+export type Route = "dashboard" | "tenants" | "programs" | "households" | "beneficiaries" | "eligibility" | "enrollment" | "payments" | "pdm" | "complaints" | "activities" | "audit" | "imports" | "automation" | "assistance" | "nfi_entitlements" | "distribution_events" | "delivery_review" | "users" | "profile";
+export type Locale = "en" | "ar";
+export type Entity = {
+  id: string;
+  name?: string;
+  full_name?: string;
+  number?: string;
+  status?: string;
+  currency?: string;
+  program?: string;
+  household?: string;
+  beneficiary?: string;
+  enrollment?: string;
+  channel_config?: string;
+  tenant?: string;
+  [key: string]: any;
+};
+export type Option = { value: string; label: string };
+export type PlatformUser = {
+  id: string;
+  email: string;
+  full_name: string;
+  role: string;
+  is_active: boolean;
+  is_superuser: boolean;
+  tenant?: { id: string; name: string };
+};
+export type ApiError = { error?: { message?: string }; detail?: string };
+export type ApiList<T> = T[] | { results: T[] };

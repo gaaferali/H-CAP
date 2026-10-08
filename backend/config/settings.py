@@ -44,12 +44,18 @@ INSTALLED_APPS = [
     "rest_framework",
     "rest_framework_simplejwt.token_blacklist",
     "corsheaders",
-    "core",
+    "accounts.apps.AccountsConfig",
+    "programs.apps.ProgramsConfig",
+    "assistance.apps.AssistanceConfig",
+    "payments.apps.PaymentsConfig",
+    "operations.apps.OperationsConfig",
+    "reporting.apps.ReportingConfig",
+    "automation.apps.AutomationConfig",
 ]
 
 MIDDLEWARE = [
     "corsheaders.middleware.CorsMiddleware",
-    "core.middleware.ApiNoStoreMiddleware",
+    "accounts.middleware.ApiNoStoreMiddleware",
     "django.middleware.security.SecurityMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
     "django.middleware.common.CommonMiddleware",
@@ -85,7 +91,7 @@ DATABASES = {
     }
 }
 
-AUTH_USER_MODEL = "core.User"
+AUTH_USER_MODEL = "accounts.User"
 LANGUAGE_CODE = "en"
 LANGUAGES = [("en", "English"), ("ar", "Arabic")]
 TIME_ZONE = os.getenv("DJANGO_TIME_ZONE", "UTC")
@@ -101,5 +107,5 @@ REST_FRAMEWORK = {
     "DEFAULT_PERMISSION_CLASSES": ["rest_framework.permissions.IsAuthenticated"],
     "DEFAULT_PAGINATION_CLASS": "rest_framework.pagination.PageNumberPagination",
     "PAGE_SIZE": 25,
-    "EXCEPTION_HANDLER": "core.views.api_exception_handler",
+    "EXCEPTION_HANDLER": "accounts.exceptions.api_exception_handler",
 }
