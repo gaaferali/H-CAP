@@ -23,7 +23,6 @@ from rest_framework_simplejwt.tokens import RefreshToken
 from accounts.models import IdempotencyRecord, Tenant, User
 from accounts.serializers import LoginSerializer, TenantSerializer, UserSerializer
 from accounts.viewsets import RoleProtectedTenantViewSet, TenantScopedModelViewSet
-from ai_services.complaint_ai import analyze_complaint
 from assistance.models import Beneficiary, CashEntitlement, Enrollment, Household, HouseholdEligibility, HouseholdEnrollment
 from assistance.serializer_helpers import national_id_digest, national_id_reference, normalize_national_id, normalize_phone_number
 from assistance.serializers import BeneficiarySerializer, CashEntitlementSerializer, EnrollmentSerializer, HouseholdEligibilitySerializer, HouseholdEnrollmentSerializer, HouseholdSerializer
@@ -41,12 +40,18 @@ from reporting.audit import audit, json_safe
 from reporting.import_utils import normalize_import_header, normalize_import_rows
 from reporting.models import AuditEvent, PDMResponse
 from reporting.serializers import AuditEventSerializer
-from services.platform import AI_AUTOMATION_ENABLED, run_anomaly_detection, run_automated_reconciliation, run_deduplication_check, verified_program_summary
+from automation.ai_source import (
+    AI_AUTOMATION_ENABLED,
+    run_anomaly_detection,
+    run_automated_reconciliation,
+    run_deduplication_check,
+    verified_program_summary,
+)
 
 
 
 class AISignalViewSet(RoleProtectedTenantViewSet):
-    queryset = AISignal.objects.select_related("program")
+    queryset = AISignal.objects.select_related("program").order_by("-created_at")
     serializer_class = AISignalSerializer
     tenant_field = "tenant"
     allowed_roles = {User.Role.ADMIN, User.Role.MANAGER, User.Role.REVIEWER, User.Role.AUDITOR}
@@ -74,7 +79,7 @@ class AISignalViewSet(RoleProtectedTenantViewSet):
 
 
 class ReviewTaskViewSet(RoleProtectedTenantViewSet):
-    queryset = ReviewTask.objects.select_related("program", "assigned_to")
+    queryset = ReviewTask.objects.select_related("program", "assigned_to").order_by("-created_at")
     serializer_class = ReviewTaskSerializer
     allowed_roles = {User.Role.ADMIN, User.Role.REVIEWER, User.Role.MANAGER, User.Role.SUPPORT}
 
@@ -99,7 +104,7 @@ class ReviewTaskViewSet(RoleProtectedTenantViewSet):
 
 
 class AutomationRuleViewSet(TenantScopedModelViewSet):
-    queryset = AutomationRule.objects.select_related("program")
+    queryset = AutomationRule.objects.select_related("program").order_by("priority", "created_at")
     serializer_class = AutomationRuleSerializer
     allowed_roles = {User.Role.ADMIN, User.Role.MANAGER, User.Role.REVIEWER}
     write_roles = {User.Role.ADMIN, User.Role.MANAGER}
@@ -113,7 +118,7 @@ class AutomationRuleViewSet(TenantScopedModelViewSet):
 
 
 class AutomationExecutionViewSet(TenantScopedModelViewSet):
-    queryset = AutomationExecution.objects.select_related("rule")
+    queryset = AutomationExecution.objects.select_related("rule").order_by("-created_at")
     serializer_class = AutomationExecutionSerializer
 
     def get_queryset(self):
@@ -241,12 +246,12 @@ def ai_automation_status_view(request):
         raise PermissionDenied("Your role does not have permission for AI and automation")
     scope = {} if request.user.is_superuser else {"tenant": request.user.tenant}
     if request.method == "GET":
-        rules = AutomationRule.objects.filter(**scope)
+        rules = AutomationRule.objects.filter(**scope).order_by("priority", "created_at")
         signals = AISignal.objects.filter(**scope)
         return Response({
             "status": "active",
             "message": "Advisory signals and controlled automation are available.",
-            "rules": list(rules.values("id", "event_name", "action_name", "is_active", "priority")),
+            "rules": AutomationRuleSerializer(rules, many=True).data,
             "signals_count": signals.count(),
             "review_tasks_open": ReviewTask.objects.filter(**scope, status__in=[ReviewTask.Status.OPEN, ReviewTask.Status.ASSIGNED]).count(),
             "advisory_only": True,

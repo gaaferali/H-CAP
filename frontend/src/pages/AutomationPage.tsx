@@ -1,10 +1,47 @@
-import { FormEvent, ReactNode, useEffect, useMemo, useState } from "react";
+import { FormEvent, useEffect, useState } from "react";
 import { api, listItems } from "../api/api";
-import type { PlatformUser } from "../api/api";
 import type { Entity, Role } from "../types/types";
 import { Badge, Field, FunctionHelp, Message, Panel, SelectField, Table, Textarea } from "../components";
-import { TranslateTree, useTranslation } from "../i18n";
-import { beneficiaryLabel, distributionEventLabel, enrollmentLabel, householdLabel, nfiBeneficiaryLabel, nfiEntitlementLabel, programLabel, readableCode, valueOf } from "../utils";
+import { beneficiaryLabel, programLabel, readableCode, valueOf } from "../utils";
+
+const formatDateTime = (value: unknown) => {
+  if (!value) return "Not recorded";
+  const date = new Date(String(value));
+  return Number.isNaN(date.getTime())
+    ? String(value)
+    : date.toLocaleString(document.documentElement.lang || undefined);
+};
+
+const humanResultValue = (value: unknown): string => {
+  if (value === null || value === undefined || value === "") return "Not recorded";
+  if (typeof value === "boolean") return value ? "Yes" : "No";
+  if (Array.isArray(value)) {
+    if (!value.length) return "None";
+    const records = value.filter(
+      (item): item is Record<string, unknown> => !!item && typeof item === "object" && !Array.isArray(item),
+    );
+    const statusKey = records.length
+      ? ["eligibility_status", "status", "priority"].find((key) => key in records[0])
+      : undefined;
+    if (statusKey) {
+      const counts = records.reduce<Record<string, number>>((summary, item) => {
+        const label = readableCode(item[statusKey] ?? "Unknown");
+        summary[label] = (summary[label] ?? 0) + 1;
+        return summary;
+      }, {});
+      return Object.entries(counts).map(([label, count]) => `${label}: ${count}`).join("; ");
+    }
+    return value.map((item) => humanResultValue(item)).join("; ");
+  }
+  if (typeof value === "object") {
+    return Object.entries(value as Record<string, unknown>)
+      .filter(([key]) => !key.endsWith("_id") && key !== "id")
+      .map(([key, item]) => `${readableCode(key)}: ${humanResultValue(item)}`)
+      .join("; ");
+  }
+  return String(value);
+};
+
 export function AutomationPage({ role }: { role: Role }) {
   const [data, setData] = useState<{
     status: string;
@@ -211,13 +248,27 @@ export function AutomationPage({ role }: { role: Role }) {
     automationResultRows ??
     (result
       ? Object.entries(result).flatMap(([key, value]) => {
+          if (["advisory_only", "verified", "review_task_created"].includes(key))
+            return [];
+          if (key === "beneficiary_id") {
+            const beneficiary = beneficiaries.find((item) => item.id === String(value));
+            return [["Beneficiary", beneficiary ? beneficiaryLabel(beneficiary) : "Selected beneficiary"]];
+          }
+          if (key === "batch_id") {
+            const batch = batches.find((item) => item.id === String(value));
+            return [[
+              "Payment batch",
+              batch
+                ? `${valueOf(batch, "name") || "Batch"} — ${valueOf(batch, "program_name") || "Program"}`
+                : "Selected payment batch",
+            ]];
+          }
+          if (key.endsWith("_id") || ["tenant", "rule"].includes(key)) return [];
           if (key === "metrics" && value && typeof value === "object")
             return Object.entries(value as Record<string, unknown>).map(
               ([metric, metricValue]) => [
-                `Verified ${metric.replaceAll("_", " ")}`,
-                typeof metricValue === "object"
-                  ? JSON.stringify(metricValue)
-                  : String(metricValue),
+                `Verified ${readableCode(metric)}`,
+                humanResultValue(metricValue),
               ],
             );
           if (
@@ -228,15 +279,17 @@ export function AutomationPage({ role }: { role: Role }) {
             return Object.entries(value as Record<string, unknown>)
               .filter(([summaryKey]) => summaryKey !== "items")
               .map(([summaryKey, summaryValue]) => [
-                summaryKey.replaceAll("_", " "),
-                String(summaryValue),
+                readableCode(summaryKey),
+                humanResultValue(summaryValue),
               ]);
           if (key === "signals" && Array.isArray(value))
             return [["Signals created", String(value.length)]];
           return [
             [
-              key.replaceAll("_", " "),
-              typeof value === "object" ? JSON.stringify(value) : String(value),
+              readableCode(key),
+              key === "status" || key === "outcome"
+                ? readableCode(value)
+                : humanResultValue(value),
             ],
           ];
         })
@@ -336,14 +389,16 @@ export function AutomationPage({ role }: { role: Role }) {
           </p>
           <Table
             headings={[
+              "Program",
               "Configured event",
               "Controlled action",
               "Priority",
               "Status",
             ]}
             rows={(data?.rules ?? []).map((rule) => [
-              valueOf(rule, "event_name"),
-              valueOf(rule, "action_name"),
+              valueOf(rule, "program_name") || "All tenant programs",
+              readableCode(valueOf(rule, "event_name")),
+              readableCode(valueOf(rule, "action_name")),
               valueOf(rule, "priority"),
               <Badge
                 value={
@@ -362,8 +417,8 @@ export function AutomationPage({ role }: { role: Role }) {
               rows={
                 Array.isArray(pipeline?.pipeline)
                   ? (pipeline.pipeline as string[]).map((stage) => [
-                      stage.replaceAll("_", " "),
-                      String(pipeline?.status ?? "completed"),
+                      readableCode(stage),
+                      readableCode(pipeline?.status ?? "completed"),
                     ])
                   : []
               }
@@ -685,7 +740,7 @@ export function AutomationPage({ role }: { role: Role }) {
                 name="signal"
                 options={openSignals.map((signal) => ({
                   value: signal.id,
-                  label: `${valueOf(signal, "signal_type")} — ${valueOf(signal, "program_name") || "Tenant"}`,
+                  label: `${readableCode(valueOf(signal, "signal_type"))} — ${valueOf(signal, "entity_label") || valueOf(signal, "program_name") || "Tenant record"}`,
                 }))}
                 required
               />
@@ -736,7 +791,7 @@ export function AutomationPage({ role }: { role: Role }) {
                 name="review_task"
                 options={openReviewTasks.map((task) => ({
                   value: task.id,
-                  label: `${valueOf(task, "task_type")} — ${valueOf(task, "program_name") || "Tenant"}`,
+                  label: `${readableCode(valueOf(task, "task_type"))} — ${valueOf(task, "entity_label") || valueOf(task, "program_name") || "Tenant record"}`,
                 }))}
                 required
               />
@@ -809,13 +864,15 @@ export function AutomationPage({ role }: { role: Role }) {
             <Table
               headings={[
                 "Type",
+                "Affected record",
                 "Program",
                 "Priority",
                 "Status",
                 "Assigned to",
               ]}
               rows={reviewTasks.map((task) => [
-                valueOf(task, "task_type"),
+                readableCode(valueOf(task, "task_type")),
+                valueOf(task, "entity_label") || "Tenant record",
                 valueOf(task, "program_name") || "Tenant",
                 <Badge value={valueOf(task, "priority") || "MEDIUM"} />,
                 <Badge value={task.status ?? "OPEN"} />,
@@ -829,13 +886,15 @@ export function AutomationPage({ role }: { role: Role }) {
         <div className="col-12">
           <Panel title="Advisory AI signals">
             <Table
-              headings={["Type", "Program", "Confidence", "Status", "Reason"]}
+              headings={["Type", "Affected record", "Program", "Confidence", "Status", "Reason", "Created"]}
               rows={signals.map((signal) => [
-                valueOf(signal, "signal_type"),
+                readableCode(valueOf(signal, "signal_type")),
+                valueOf(signal, "entity_label") || "Tenant record",
                 valueOf(signal, "program_name") || "Tenant",
-                valueOf(signal, "confidence"),
+                `${(Number(signal.confidence ?? 0) * 100).toFixed(0)}%`,
                 <Badge value={signal.status ?? "OPEN"} />,
                 valueOf(signal, "reason"),
+                formatDateTime(signal.created_at),
               ])}
             />
           </Panel>
@@ -855,7 +914,7 @@ export function AutomationPage({ role }: { role: Role }) {
               ]}
               rows={reconciliationItems.map((item) => [
                 valueOf(item, "program_name") || "Program",
-                valueOf(item, "issue_type"),
+                readableCode(valueOf(item, "issue_type")),
                 valueOf(item, "expected_amount") || "—",
                 valueOf(item, "actual_amount") || "—",
                 <Badge value={item.status ?? "OPEN"} />,

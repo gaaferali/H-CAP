@@ -36,6 +36,36 @@ class IdempotencyRecord(models.Model):
         constraints = [models.UniqueConstraint(fields=["tenant", "actor", "endpoint", "idempotency_key"], name="unique_idempotency_request")]
 
 
+class SyncOperation(models.Model):
+    class Status(models.TextChoices):
+        APPLIED = "APPLIED", "Applied"
+        DUPLICATE = "DUPLICATE", "Duplicate"
+        CONFLICT = "CONFLICT", "Conflict"
+        REJECTED = "REJECTED", "Rejected"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    tenant = models.ForeignKey(Tenant, on_delete=models.PROTECT, related_name="sync_operations")
+    operation_id = models.CharField(max_length=160)
+    operation_type = models.CharField(max_length=80)
+    client_generated_id = models.CharField(max_length=160, blank=True)
+    status = models.CharField(max_length=20, choices=Status.choices, default=Status.APPLIED)
+    request_hash = models.CharField(max_length=64, blank=True)
+    validation_results = models.JSONField(default=dict, blank=True, encoder=DjangoJSONEncoder)
+    error_message = models.TextField(blank=True)
+    created_at = models.DateTimeField(default=django_timezone.now)
+    processed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = "core_syncoperation"
+        ordering = ["-created_at"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["tenant", "operation_id"],
+                name="unique_sync_operation_per_tenant",
+            )
+        ]
+
+
 class UserManager(BaseUserManager):
     def create_user(self, email, full_name, tenant=None, password=None, **extra_fields):
         if not email:

@@ -256,6 +256,22 @@ const arabic: Record<string, string> = {
   "CSV or XLSX file": "ملف CSV أو XLSX",
   "Preview and validate": "معاينة والتحقق",
   "Confirm and save valid rows": "تأكيد وحفظ الصفوف الصحيحة",
+  "Validated row preview": "معاينة الصفوف التي تم التحقق منها",
+  "Review these normalized values before confirming the import. National IDs remain protected references.":
+    "راجع هذه القيم الموحدة قبل تأكيد الاستيراد. تظل الأرقام الوطنية مراجع محمية.",
+  "Client reference": "مرجع العميل",
+  Consent: "الموافقة",
+  "Rows Received": "الصفوف المستلمة",
+  "Rows Valid": "الصفوف الصحيحة",
+  "Rows Invalid": "الصفوف غير الصحيحة",
+  "Possible Duplicate Matches": "مطابقات التكرار المحتملة",
+  "Client Identifiers Preserved": "تم الاحتفاظ بمعرّفات العميل",
+  "Households Created": "الأسر المنشأة",
+  "Beneficiaries Created": "المستفيدون المنشؤون",
+  "Duplicate Flags": "إشارات التكرار",
+  "Ready For Confirmation": "جاهز للتأكيد",
+  "Duplicate Flagged": "تم رصد تكرار محتمل",
+  Matches: "المطابقات",
   Row: "الصف",
   Field: "الحقل",
   Message: "الرسالة",
@@ -549,6 +565,16 @@ const arabic: Record<string, string> = {
   "Run AI Analysis": "تشغيل تحليل الذكاء الاصطناعي",
   "Refresh AI Analysis": "تحديث تحليل الذكاء الاصطناعي",
   "Evidence and payment context": "الأدلة وسياق الدفع",
+  Evidence: "الدليل",
+  Finding: "النتيجة",
+  "Complaint category supplied": "فئة الشكوى المدخلة",
+  "Keyword rule matches": "مطابقات قواعد الكلمات المفتاحية",
+  "No keyword rule matched": "لم تتطابق أي قاعدة كلمات مفتاحية",
+  "No linked payment evidence is available for this complaint.":
+    "لا تتوفر أدلة دفع مرتبطة بهذه الشكوى.",
+  "Recent payment events": "أحداث الدفع الأخيرة",
+  "Status change": "تغير الحالة",
+  "Provider transaction reference": "مرجع معاملة المزود",
   "No AI analysis is available for this complaint.": "لا يتوفر تحليل بالذكاء الاصطناعي لهذه الشكوى.",
   "Select a complaint to view details and AI analysis.": "اختر شكوى لعرض تفاصيلها وتحليل الذكاء الاصطناعي.",
   "Human Review Required": "مراجعة بشرية مطلوبة",
@@ -628,6 +654,13 @@ const arabic: Record<string, string> = {
   "The controlled automation result was recorded.": "تم تسجيل نتيجة الأتمتة المضبوطة.",
   "The detector creates advisory signals and human review tasks only.":
     "ينشئ الكاشف إشارات استشارية ومهام مراجعة بشرية فقط.",
+  "Affected record": "السجل المتأثر",
+  Created: "تاريخ الإنشاء",
+  "All tenant programs": "كل برامج الجهة",
+  "Tenant record": "سجل الجهة",
+  "Selected beneficiary": "المستفيد المحدد",
+  "Selected payment batch": "دفعة الدفع المحددة",
+  "Signals created": "الإشارات المنشأة",
   "This is the outcome of the action you just ran. Review the values below and use any new signal, task, or reconciliation exception in the relevant queue.":
     "هذه نتيجة الإجراء الذي نفذته للتو. راجع القيم أدناه واستخدم أي إشارة أو مهمة أو استثناء تسوية جديد في قائمة الانتظار المناسبة.",
   "Could not load AI and automation status.": "تعذر تحميل حالة الذكاء الاصطناعي والأتمتة.",
@@ -1044,7 +1077,8 @@ const arabicInline: Record<string, string> = {
 };
 
 export function translateArabic(value: string) {
-  const direct = arabic[value] ?? arabicInline[value];
+  const codeKey = value.trim().replaceAll(" ", "_").toUpperCase();
+  const direct = arabic[value] ?? arabic[codeKey] ?? arabicInline[value];
   if (direct) return direct;
   return Object.entries(arabicInline)
     .sort(([first], [second]) => second.length - first.length)

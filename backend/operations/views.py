@@ -24,7 +24,7 @@ from rest_framework_simplejwt.tokens import RefreshToken
 from accounts.models import IdempotencyRecord, Tenant, User
 from accounts.serializers import LoginSerializer, TenantSerializer, UserSerializer
 from accounts.viewsets import RoleProtectedTenantViewSet, TenantScopedModelViewSet
-from ai_services.complaint_ai import analyze_complaint
+from automation.ai_source import analyze_complaint
 from assistance.models import Beneficiary, CashEntitlement, Enrollment, Household, HouseholdEligibility, HouseholdEnrollment
 from assistance.serializer_helpers import national_id_digest, national_id_reference, normalize_national_id, normalize_phone_number
 from assistance.serializers import BeneficiarySerializer, CashEntitlementSerializer, EnrollmentSerializer, HouseholdEligibilitySerializer, HouseholdEnrollmentSerializer, HouseholdSerializer
@@ -42,7 +42,6 @@ from reporting.audit import audit, json_safe
 from reporting.import_utils import normalize_import_header, normalize_import_rows
 from reporting.models import AuditEvent, PDMResponse
 from reporting.serializers import AuditEventSerializer
-from services.platform import AI_AUTOMATION_ENABLED, run_anomaly_detection, run_automated_reconciliation, run_deduplication_check, verified_program_summary
 
 
 
@@ -100,7 +99,7 @@ class PaymentDeliveryReviewViewSet(RoleProtectedTenantViewSet):
 
 
 class ComplaintViewSet(RoleProtectedTenantViewSet):
-    queryset = Complaint.objects.select_related("beneficiary", "beneficiary__household")
+    queryset = Complaint.objects.select_related("beneficiary", "beneficiary__household").order_by("-created_at")
     serializer_class = ComplaintSerializer
     tenant_field = "beneficiary__household__tenant"
     allowed_roles = {User.Role.ADMIN, User.Role.SUPPORT, User.Role.MANAGER}

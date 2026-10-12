@@ -1,21 +1,26 @@
-
 from decimal import Decimal, InvalidOperation
 from hashlib import sha256
 from uuid import uuid4
 
 from django.db import transaction
-from django.db.models import Q
 from django.utils import timezone
 
-from assistance.models import Beneficiary, Enrollment
-from automation.models import AISignal, AutomationExecution, AutomationRule, ReviewTask
-from operations.models import Complaint
-from payments.models import PaymentBatch, PaymentInstruction, ReconciliationItem
-from reporting.models import AuditEvent
+from .models import (
+    AISignal,
+    AutomationExecution,
+    AutomationRule,
+    Beneficiary,
+    PaymentBatch,
+    PaymentInstruction,
+    PaymentEvent,
+    Budget,
+    ReconciliationItem,
+    ReviewTask,
+    SyncOperation,
+    AuditEvent,
+)
 
 
-AI_AUTOMATION_ENABLED = True
-OFFLINE_SYNC_ENABLED = False
 
 
 # ---------------------------------------------------------------------------
@@ -26,6 +31,151 @@ TASK3_CASH_MAX = Decimal("160.00")
 TASK3_CASH_BASE = Decimal("100.00")
 TASK3_CASH_INCREMENT = Decimal("20.00")
 TASK3_CASH_FEE = Decimal("2.00")
+
+
+def _cash_budget_for_batch(batch, *, lock=False):
+    """Return the program budget used as the synthetic CASH funding envelope."""
+    qs = Budget.objects.filter(program=batch.program)
+    if lock:
+        qs = qs.select_for_update()
+    budget = qs.first()
+    if not budget:
+        raise ValueError("CASH batch requires a program budget with planned_total funding")
+    return budget
+
+
+def calculate_cash_batch_ledger(batch, funding=None):
+    """Derive CASH ledger figures from payment instruction states."""
+    instructions = list(batch.instructions.all())
+    settled = [i for i in instructions if i.status == PaymentInstruction.Status.SUCCESS]
+    pending = [i for i in instructions if i.status == PaymentInstruction.Status.SUBMITTED]
+    failed = [i for i in instructions if i.status == PaymentInstruction.Status.FAILED]
+    principal = sum((i.amount for i in settled), Decimal("0"))
+    fees = Decimal(len(settled)) * TASK3_CASH_FEE
+    debit = principal + fees
+    pending_reserve = sum((i.amount for i in pending), Decimal("0")) + Decimal(len(pending)) * TASK3_CASH_FEE
+    if funding is None:
+        try:
+            funding = _cash_budget_for_batch(batch).planned_total
+        except ValueError:
+            funding = Decimal("0")
+    funding = Decimal(funding)
+    return {
+        "funding": str(funding),
+        "settled_count": len(settled),
+        "failed_count": len(failed),
+        "pending_count": len(pending),
+        "principal": str(principal),
+        "fees": str(fees),
+        "debit": str(debit),
+        "ledger_balance": str(funding - debit),
+        "pending_reserve": str(pending_reserve),
+        "available": str(funding - debit - pending_reserve),
+    }
+
+
+@transaction.atomic
+def authorize_cash_batch(batch_id, actor):
+    """Atomically authorize a CASH batch against the program funding envelope."""
+    batch = PaymentBatch.objects.select_for_update().select_related("program", "tenant").filter(pk=batch_id).first()
+    if not batch:
+        raise ValueError("Payment batch not found")
+    if not is_task3_cash_program(batch.program):
+        raise ValueError("Batch is not a CASH program")
+
+    budget = _cash_budget_for_batch(batch, lock=True)
+    instructions = list(batch.instructions.select_for_update().all())
+    if not instructions:
+        raise ValueError("Payment batch has no payment instructions")
+
+    required = sum((i.amount for i in instructions), Decimal("0")) + Decimal(len(instructions)) * TASK3_CASH_FEE
+    available_funding = budget.planned_total - budget.actual_total
+
+    if required > available_funding:
+        batch.status = PaymentBatch.Status.FAILED
+        batch.provider_response = {
+            **(batch.provider_response or {}),
+            "authorization": "REJECTED",
+            "reason": "INSUFFICIENT_FUNDING",
+            "required": str(required),
+            "available_funding": str(available_funding),
+            "submitted_count": 0,
+        }
+        batch.save(update_fields=["status", "provider_response"])
+        AuditEvent.objects.create(
+            tenant=batch.tenant, actor=actor, action="CASH_BATCH_AUTHORIZATION_REJECTED",
+            entity_type="PAYMENT_BATCH", entity_id=str(batch.id),
+            after={"required": str(required), "available_funding": str(available_funding), "submitted_count": 0},
+        )
+        return {"authorized": False, "required": str(required), "available_funding": str(available_funding), "submitted_count": 0}
+
+    for instruction in instructions:
+        if instruction.status != PaymentInstruction.Status.CREATED:
+            raise ValueError(f"Instruction {instruction.id} is not ready for authorization")
+
+    for instruction in instructions:
+        old_status = instruction.status
+        instruction.status = PaymentInstruction.Status.SUBMITTED
+        instruction.save(update_fields=["status"])
+        PaymentEvent.objects.create(
+            instruction=instruction,
+            event_type=PaymentEvent.EventType.SUBMITTED,
+            provider_status=PaymentEvent.ProviderStatus.ACCEPTED,
+            from_status=old_status,
+            to_status=instruction.status,
+            recorded_by=actor,
+            redacted_payload={"batch_authorized": True, "provider_request": "mock"},
+        )
+
+    batch.status = PaymentBatch.Status.SUBMITTED
+    batch.provider_response = {
+        **(batch.provider_response or {}),
+        "authorization": "AUTHORIZED",
+        "required": str(required),
+        "available_funding": str(available_funding),
+        "submitted_count": len(instructions),
+    }
+    batch.save(update_fields=["status", "provider_response"])
+    AuditEvent.objects.create(
+        tenant=batch.tenant, actor=actor, action="CASH_BATCH_AUTHORIZED",
+        entity_type="PAYMENT_BATCH", entity_id=str(batch.id),
+        after={"required": str(required), "available_funding": str(available_funding), "submitted_count": len(instructions)},
+    )
+    return {"authorized": True, "required": str(required), "available_funding": str(available_funding), "submitted_count": len(instructions)}
+
+
+@transaction.atomic
+def record_cash_settlement(instruction, actor, provider_reference=""):
+    """Settle one CASH instruction exactly once and post principal + fee."""
+    if instruction.status == PaymentInstruction.Status.SUCCESS:
+        if provider_reference and instruction.provider_reference == provider_reference:
+            return {"settled": False, "duplicate": True, "double_posting": False}
+        raise ValueError("Instruction is already settled with a different provider reference")
+    if instruction.status != PaymentInstruction.Status.SUBMITTED:
+        raise ValueError("Only submitted CASH instructions can settle")
+
+    budget = Budget.objects.select_for_update().get(program=instruction.enrollment.program)
+    old_status = instruction.status
+    instruction.status = PaymentInstruction.Status.SUCCESS
+    instruction.provider_reference = instruction.provider_reference or provider_reference
+    instruction.save(update_fields=["status", "provider_reference"])
+    PaymentEvent.objects.create(
+        instruction=instruction, event_type=PaymentEvent.EventType.SUCCESS,
+        provider_status=PaymentEvent.ProviderStatus.SETTLED,
+        provider_transaction_id=provider_reference,
+        from_status=old_status, to_status=instruction.status,
+        recorded_by=actor,
+        redacted_payload={"settled": True, "fee": str(TASK3_CASH_FEE)},
+    )
+    budget.actual_total = budget.actual_total + instruction.amount + TASK3_CASH_FEE
+    budget.save(update_fields=["actual_total"])
+    AuditEvent.objects.create(
+        tenant=instruction.enrollment.program.tenant, actor=actor,
+        action="CASH_PAYMENT_SETTLED", entity_type="PAYMENT_INSTRUCTION",
+        entity_id=str(instruction.id),
+        after={"provider_reference": instruction.provider_reference, "debit": str(instruction.amount + TASK3_CASH_FEE)},
+    )
+    return {"settled": True, "duplicate": False, "double_posting": False}
 
 
 def calculate_cash_transfer_amount(household_size):
@@ -97,12 +247,7 @@ def validate_task3_cash_amount(*, program, beneficiary, proposed_amount, entity_
 @transaction.atomic
 def record_offline_event(*, tenant, operation_id, operation_type, payload, client_generated_id="", actor=None):
     """Idempotent receipt for an offline event. Same payload is acknowledged; changed payload is rejected."""
-    if not OFFLINE_SYNC_ENABLED:
-        raise RuntimeError("Offline sync is not enabled.")
-
     import json
-    from accounts.models import SyncOperation
-
     canonical = json.dumps(payload or {}, sort_keys=True, default=str, separators=(",", ":"))
     request_hash = sha256(canonical.encode()).hexdigest()
     existing = SyncOperation.objects.select_for_update().filter(tenant=tenant, operation_id=operation_id).first()
@@ -226,24 +371,10 @@ def _open_signal(*, tenant, program, entity_type, entity_id, signal_type, score,
 
 def run_deduplication_check(beneficiary):
     """Compatibility wrapper used by imports and the API."""
-    from ai_services.duplicate_detector import DuplicateDetector
+    from .ai.duplicate_detector import DuplicateDetector
 
     results = DuplicateDetector.detect_for(beneficiary.id)
-    signal_ids = list(dict.fromkeys(result["signal_id"] for result in results))
-    signals_by_id = {
-        str(signal.id): signal
-        for signal in AISignal.objects.filter(id__in=signal_ids)
-    }
-    signals = [
-        signals_by_id[result["signal_id"]]
-        for result in results
-        if result["signal_id"] in signals_by_id
-    ]
-    return {
-        "matches": len(results),
-        "signals": signals,
-        "results": results,
-    }
+    return bool(results)
 
 
 # ---------------------------------------------------------------------------
@@ -307,16 +438,11 @@ def run_data_quality_check(beneficiary, create_tasks=True):
 @transaction.atomic
 def validate_synced_registration(sync_operation, household, beneficiaries):
     """Validate data after an offline registration is applied to the server."""
-    if not OFFLINE_SYNC_ENABLED:
-        raise RuntimeError("Offline sync is not enabled.")
-
-    from accounts.models import SyncOperation
-
     results = []
     for beneficiary in beneficiaries:
         result = run_data_quality_check(beneficiary, create_tasks=True)
         duplicate_results = run_deduplication_check(beneficiary)
-        result["duplicate_flagged"] = duplicate_results["matches"] > 0
+        result["duplicate_flagged"] = duplicate_results
         results.append({"beneficiary_id": str(beneficiary.id), **result})
 
     sync_operation.validation_results = {
@@ -489,39 +615,6 @@ def run_anomaly_detection(payment_batch):
             resolution=f"Review anomaly signal {signal.id} before payment is treated as cleared.",
         )
     return anomalies
-
-
-def verified_program_summary(program):
-    payments = PaymentInstruction.objects.filter(
-        Q(cash_entitlement__program=program) | Q(enrollment__program=program)
-    )
-    enrollments = Enrollment.objects.filter(program=program)
-    return {
-        "beneficiaries": Beneficiary.objects.filter(household__program=program).count(),
-        "eligibility": list(enrollments.values("eligibility_status").order_by("eligibility_status")),
-        "approvals": enrollments.filter(status=Enrollment.Status.APPROVED).count(),
-        "payments": list(payments.values("status").order_by("status")),
-        "amounts": {
-            "approved": str(
-                (program.transfer_amount or Decimal("0"))
-                * enrollments.filter(status=Enrollment.Status.APPROVED).count()
-            ),
-            "distributed": str(
-                sum(
-                    (
-                        payment.amount
-                        for payment in payments.filter(status=PaymentInstruction.Status.SUCCESS)
-                    ),
-                    Decimal("0"),
-                )
-            ),
-        },
-        "failures": payments.filter(status=PaymentInstruction.Status.FAILED).count(),
-        "complaints": Complaint.objects.filter(
-            beneficiary__household__program=program
-        ).count(),
-        "verified_at": timezone.now(),
-    }
 
 
 # ---------------------------------------------------------------------------

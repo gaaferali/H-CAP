@@ -2,25 +2,30 @@ from decimal import Decimal
 from django.db import transaction
 from django.utils import timezone
 
-from automation.models import AISignal, ReviewTask
-from operations.models import Complaint, ComplaintAIAnalysis
-from payments.models import PaymentEvent, PaymentInstruction
+from .models import (
+    AISignal,
+    Complaint,
+    ComplaintAIAnalysis,
+    PaymentEvent,
+    PaymentInstruction,
+    ReviewTask,
+)
 
 MODEL_VERSION = "complaint-rules-v1"
 
 CATEGORY_RULES = {
-    "PAYMENT_NOT_RECEIVED": ["not received", "did not receive", "didn't receive", "didnt receive", "money not", "payment not", "Ù…Ø§ ÙˆØµÙ„", "Ù…Ø§ Ø§Ø³ØªÙ„Ù…", "Ù…Ø§ Ø§Ø³ØªÙ„Ù…Øª", "Ø§Ù„Ù…Ø¨Ù„Øº Ù…Ø§", "Ø§Ù„Ø¯ÙØ¹ Ù…Ø§"],
-    "PAYMENT_DELAY": ["delay", "delayed", "late", "waiting", "Ù…ØªØ£Ø®Ø±", "ØªØ£Ø®ÙŠØ±", "Ù„Ø³Ù‡", "Ù„Ù… ÙŠØµÙ„"],
-    "WRONG_AMOUNT": ["wrong amount", "incorrect amount", "less than", "missing amount", "Ù…Ø¨Ù„Øº Ø®Ø·Ø£", "Ø§Ù„Ù…Ø¨Ù„Øº Ù†Ø§Ù‚Øµ", "Ù†Ø§Ù‚Øµ"],
-    "REGISTRATION": ["registration", "register", "registered", "ØªØ³Ø¬ÙŠÙ„", "Ø§Ù„ØªØ³Ø¬ÙŠÙ„", "Ø³Ø¬Ù„", "ØªØ³Ø¬ÙŠÙ„Ù†Ø§"],
-    "ELIGIBILITY": ["eligible", "eligibility", "rejected", "not eligible", "Ø§Ø³ØªØ­Ù‚Ø§Ù‚", "Ù…Ø³ØªØ­Ù‚", "Ø±ÙØ¶", "Ù…Ø±ÙÙˆØ¶", "ØºÙŠØ± Ù…Ø³ØªØ­Ù‚"],
-    "AGENT_BEHAVIOR": ["agent", "staff", "field officer", "Ù…ÙˆØ¸Ù", "Ø¹Ø§Ù…Ù„", "Ù…Ù†Ø¯ÙˆØ¨", "Ø³Ù„ÙˆÙƒ"],
-    "ACCESS": ["access", "cannot access", "can't access", "ØµØ¹ÙˆØ¨Ø©", "Ù…Ø§ Ù‚Ø§Ø¯Ø±", "Ù„Ø§ Ø§Ø³ØªØ·ÙŠØ¹", "Ø§Ù„ÙˆØµÙˆÙ„"],
+    "PAYMENT_NOT_RECEIVED": ["not received", "did not receive", "didn't receive", "didnt receive", "money not", "payment not", "ما وصل", "ما استلم", "ما استلمت", "المبلغ ما", "الدفع ما"],
+    "PAYMENT_DELAY": ["delay", "delayed", "late", "waiting", "متأخر", "تأخير", "لسه", "لم يصل"],
+    "WRONG_AMOUNT": ["wrong amount", "incorrect amount", "less than", "missing amount", "مبلغ خطأ", "المبلغ ناقص", "ناقص"],
+    "REGISTRATION": ["registration", "register", "registered", "تسجيل", "التسجيل", "سجل", "تسجيلنا"],
+    "ELIGIBILITY": ["eligible", "eligibility", "rejected", "not eligible", "استحقاق", "مستحق", "رفض", "مرفوض", "غير مستحق"],
+    "AGENT_BEHAVIOR": ["agent", "staff", "field officer", "موظف", "عامل", "مندوب", "سلوك"],
+    "ACCESS": ["access", "cannot access", "can't access", "صعوبة", "ما قادر", "لا استطيع", "الوصول"],
     "OTHER": [],
 }
 
-CRITICAL_TERMS = ["threat", "violence", "abuse", "harassment", "safety", "Ø®Ø·Ø±", "Ø¹Ù†Ù", "Ø¥Ø³Ø§Ø¡Ø©", "ØªØ­Ø±Ø´", "ØªÙ‡Ø¯ÙŠØ¯"]
-HIGH_TERMS = ["urgent", "emergency", "critical", "Ø®Ø·Ø±", "Ø·Ø§Ø±Ø¦", "Ø¹Ø§Ø¬Ù„"]
+CRITICAL_TERMS = ["threat", "violence", "abuse", "harassment", "safety", "خطر", "عنف", "إساءة", "تحرش", "تهديد"]
+HIGH_TERMS = ["urgent", "emergency", "critical", "خطر", "طارئ", "عاجل"]
 
 
 def _text(complaint):

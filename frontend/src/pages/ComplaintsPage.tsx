@@ -1,10 +1,80 @@
-import { FormEvent, ReactNode, useEffect, useMemo, useState } from "react";
+import { FormEvent, useEffect, useState } from "react";
 import { api, listItems } from "../api/api";
 import type { PlatformUser } from "../api/api";
 import type { Entity, Role } from "../types/types";
-import { Badge, Field, FunctionHelp, Message, Panel, SelectField, Table, Textarea } from "../components";
-import { TranslateTree, useTranslation } from "../i18n";
-import { beneficiaryLabel, distributionEventLabel, enrollmentLabel, householdLabel, nfiBeneficiaryLabel, nfiEntitlementLabel, programLabel, readableCode, valueOf } from "../utils";
+import { Badge, Message, Panel, SelectField, Table, Textarea } from "../components";
+import { beneficiaryLabel, readableCode, valueOf } from "../utils";
+
+const formatDateTime = (value: unknown) => {
+  if (!value) return "Not recorded";
+  const date = new Date(String(value));
+  return Number.isNaN(date.getTime())
+    ? String(value)
+    : date.toLocaleString(document.documentElement.lang || undefined);
+};
+
+function ComplaintEvidence({ value }: { value: unknown }) {
+  const evidence = value && typeof value === "object"
+    ? (value as Record<string, unknown>)
+    : {};
+  const keywordMatches = evidence.keyword_matches && typeof evidence.keyword_matches === "object"
+    ? (evidence.keyword_matches as Record<string, unknown>)
+    : {};
+  const payment = evidence.payment_context && typeof evidence.payment_context === "object"
+    ? (evidence.payment_context as Record<string, unknown>)
+    : {};
+  const recentEvents = Array.isArray(payment.recent_events)
+    ? (payment.recent_events as Record<string, unknown>[])
+    : [];
+
+  return (
+    <div className="ai-evidence-readable">
+      <Table
+        headings={["Evidence", "Finding"]}
+        rows={[
+          ["Complaint category supplied", readableCode(evidence.complaint_category_input || "Not recorded")],
+          [
+            "Keyword rule matches",
+            Object.keys(keywordMatches).length
+              ? Object.entries(keywordMatches)
+                  .map(([category, count]) => `${readableCode(category)}: ${String(count)}`)
+                  .join("; ")
+              : "No keyword rule matched",
+          ],
+        ]}
+      />
+      {payment.available === false || !payment.payment_status ? (
+        <div className="alert alert-secondary mb-0">
+          {String(payment.message || "No linked payment evidence is available for this complaint.")}
+        </div>
+      ) : (
+        <>
+          <Table
+            headings={["Payment status", "Amount", "Currency", "Provider reference"]}
+            rows={[[
+              <Badge value={String(payment.payment_status || "UNKNOWN")} />,
+              String(payment.payment_amount || "Not recorded"),
+              String(payment.currency || "Not recorded"),
+              String(payment.provider_reference || "Not recorded"),
+            ]]}
+          />
+          <h4>Recent payment events</h4>
+          <Table
+            headings={["Event", "Status change", "Provider status", "Provider transaction reference", "Time"]}
+            rows={recentEvents.map((event) => [
+              readableCode(event.event_type),
+              `${readableCode(event.from_status || "Not recorded")} → ${readableCode(event.to_status || "Not recorded")}`,
+              <Badge value={String(event.provider_status || "UNKNOWN")} />,
+              String(event.provider_transaction_id || "Not recorded"),
+              formatDateTime(event.created_at),
+            ])}
+          />
+        </>
+      )}
+    </div>
+  );
+}
+
 export function ComplaintsPage({ role }: { role: Role }) {
   const [beneficiaries, setBeneficiaries] = useState<Entity[]>([]);
   const [complaints, setComplaints] = useState<Entity[]>([]);
@@ -289,7 +359,7 @@ export function ComplaintsPage({ role }: { role: Role }) {
             rows={complaints.map((item) => [
               valueOf(item, "beneficiary_name") || "Beneficiary",
               valueOf(item, "program_name") || "Program",
-              valueOf(item, "category"),
+              readableCode(valueOf(item, "category")),
               <Badge value={valueOf(item, "severity") || "MEDIUM"} />,
               <Badge
                 value={item.ai_analysis_available ? "ANALYZED" : "NOT ANALYZED"}
@@ -307,8 +377,6 @@ export function ComplaintsPage({ role }: { role: Role }) {
         {selectedComplaint && (
           <Panel title="Complaint details">
             <dl className="complaint-details">
-              <dt>Complaint ID</dt>
-              <dd>{selectedComplaint.id}</dd>
               <dt>Beneficiary</dt>
               <dd>{valueOf(selectedComplaint, "beneficiary_name")}</dd>
               <dt>Program / household</dt>
@@ -317,13 +385,13 @@ export function ComplaintsPage({ role }: { role: Role }) {
                 {valueOf(selectedComplaint, "household_reference")}
               </dd>
               <dt>Category</dt>
-              <dd>{valueOf(selectedComplaint, "category")}</dd>
+              <dd>{readableCode(valueOf(selectedComplaint, "category"))}</dd>
               <dt>Description</dt>
               <dd>{valueOf(selectedComplaint, "description")}</dd>
               <dt>Severity / status</dt>
               <dd>
-                {valueOf(selectedComplaint, "severity")} /{" "}
-                {valueOf(selectedComplaint, "status")}
+                {readableCode(valueOf(selectedComplaint, "severity"))} /{" "}
+                {readableCode(valueOf(selectedComplaint, "status"))}
               </dd>
               <dt>Assigned user</dt>
               <dd>
@@ -363,7 +431,7 @@ export function ComplaintsPage({ role }: { role: Role }) {
                     )}
                   </div>
                   <p>
-                    <strong>Category:</strong> {valueOf(analysis, "category")}
+                    <strong>Category:</strong> {readableCode(valueOf(analysis, "category"))}
                   </p>
                   <p>
                     <strong>Summary:</strong> {valueOf(analysis, "summary")}
@@ -400,13 +468,11 @@ export function ComplaintsPage({ role }: { role: Role }) {
                       )}
                   </ul>
                   <h3>Evidence and payment context</h3>
-                  <pre className="ai-evidence">
-                    {JSON.stringify(analysis.evidence ?? {}, null, 2)}
-                  </pre>
+                  <ComplaintEvidence value={analysis.evidence} />
                   {analysis.review_decision && (
                     <p>
-                      <strong>Human decision:</strong>{" "}
-                      {valueOf(analysis, "review_decision")} —{" "}
+                       <strong>Human decision:</strong>{" "}
+                       {readableCode(valueOf(analysis, "review_decision"))} —{" "}
                       {valueOf(analysis, "reviewer_note")}
                     </p>
                   )}

@@ -1,10 +1,16 @@
-import { FormEvent, ReactNode, useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import { api, listItems } from "../api/api";
-import type { PlatformUser } from "../api/api";
-import type { Entity, Role } from "../types/types";
-import { Badge, Field, FunctionHelp, Message, Panel, SelectField, Table, Textarea } from "../components";
-import { TranslateTree, useTranslation } from "../i18n";
-import { beneficiaryLabel, distributionEventLabel, enrollmentLabel, householdLabel, nfiBeneficiaryLabel, nfiEntitlementLabel, programLabel, readableCode, valueOf } from "../utils";
+import type { Entity } from "../types/types";
+import { Badge, Message, Panel, SelectField, Table } from "../components";
+import { programLabel, readableCode } from "../utils";
+
+const readableImportValue = (key: string, value: unknown) => {
+  if (typeof value === "boolean") return value ? "Yes" : "No";
+  if (key === "status") return readableCode(value);
+  if (value === null || value === undefined || value === "") return "Not recorded";
+  return String(value);
+};
+
 export function ImportsPage() {
   const [programs, setPrograms] = useState<Entity[]>([]);
   const [programId, setProgramId] = useState("");
@@ -122,10 +128,29 @@ export function ImportsPage() {
                 !["errors", "preview_rows", "confirmation_token"].includes(key),
             )
             .map(([key, value]) => [
-              key.replaceAll("_", " "),
-              typeof value === "object" ? JSON.stringify(value) : String(value),
+              readableCode(key),
+              key === "status" ? <Badge value={String(value)} /> : readableImportValue(key, value),
             ])}
         />
+      )}
+      {Array.isArray(result?.preview_rows) && result.preview_rows.length > 0 && (
+        <>
+          <h3 className="mt-4">Validated row preview</h3>
+          <p className="form-text">
+            Review these normalized values before confirming the import. National IDs remain protected references.
+          </p>
+          <Table
+            headings={["Client reference", "Full name", "Location", "Household size", "Verification", "Consent"]}
+            rows={(result.preview_rows as Record<string, unknown>[]).map((row) => [
+              String(row.client_id || "Not recorded"),
+              String(row.full_name || "Not recorded"),
+              String(row.location || "Not recorded"),
+              String(row.size || "Not recorded"),
+              <Badge value={String(row.verification_status || "PENDING")} />,
+              row.consent_given ? "Yes" : "No",
+            ])}
+          />
+        </>
       )}
       {Array.isArray(result?.errors) && (
         <Table

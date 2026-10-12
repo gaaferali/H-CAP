@@ -1,11 +1,9 @@
-
 from decimal import Decimal
 from difflib import SequenceMatcher
 
 from django.db import transaction
 
-from assistance.models import Beneficiary
-from automation.models import AISignal, ReviewTask
+from core.models import AISignal, Beneficiary, ReviewTask
 
 
 class DuplicateDetector:
@@ -35,15 +33,7 @@ class DuplicateDetector:
             factors.append({"field": "full_name", "match": round(name_score, 4)})
             scores.append(("name", name_score))
 
-        beneficiary_phone = "".join(
-            character for character in (beneficiary.phone_number or "") if character.isdigit()
-        )
-        candidate_phone = "".join(
-            character for character in (candidate.phone_number or "") if character.isdigit()
-        )
-        beneficiary_phone_last4 = beneficiary_phone[-4:] if len(beneficiary_phone) >= 4 else ""
-        candidate_phone_last4 = candidate_phone[-4:] if len(candidate_phone) >= 4 else ""
-        if beneficiary_phone_last4 and candidate_phone_last4 and beneficiary_phone_last4 == candidate_phone_last4:
+        if beneficiary.phone_last4 and candidate.phone_last4 and beneficiary.phone_last4 == candidate.phone_last4:
             factors.append({"field": "phone_last4", "match": 1.0})
             scores.append(("phone", 1.0))
 
@@ -88,12 +78,7 @@ class DuplicateDetector:
 
             priority = ReviewTask.Priority.HIGH if score >= cls.HIGH_THRESHOLD else ReviewTask.Priority.MEDIUM
             reason = f"Possible duplicate: {beneficiary.full_name} matches {candidate.full_name}."
-            evidence = {
-                "candidate_id": str(candidate.id),
-                "candidate_name": candidate.full_name,
-                "score": score,
-                "matching_factors": factors,
-            }
+            evidence = {"candidate_id": str(candidate.id), "candidate_name": candidate.full_name, "score": score, "matching_factors": factors}
 
             # Candidate ID is part of evidence, so repeated scans do not create a task/signal storm.
             signal = AISignal.objects.filter(
@@ -101,7 +86,6 @@ class DuplicateDetector:
                 entity_type="BENEFICIARY",
                 entity_id=str(beneficiary.id),
                 signal_type="POSSIBLE_DUPLICATE",
-                program=beneficiary.household.program,
                 model_version=cls.MODEL_VERSION,
                 status=AISignal.Status.OPEN,
                 evidence__candidate_id=str(candidate.id),
@@ -135,16 +119,5 @@ class DuplicateDetector:
                     "resolution": f"Review possible duplicate candidate {candidate.id}; signal {signal.id}.",
                 },
             )
-            results.append(
-                {
-                    "candidate_id": str(candidate.id),
-                    "candidate_name": candidate.full_name,
-                    "score": score,
-                    "confidence": score,
-                    "priority": priority,
-                    "matching_factors": factors,
-                    "signal_id": str(signal.id),
-                    "review_task_id": str(task.id),
-                }
-            )
+            results.append({"candidate_id": str(candidate.id), "candidate_name": candidate.full_name, "score": score, "confidence": score, "priority": priority, "matching_factors": factors, "signal_id": str(signal.id), "review_task_id": str(task.id)})
         return results
