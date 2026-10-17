@@ -7,6 +7,7 @@ from django.utils import timezone as django_timezone
 from accounts.models import Tenant, User
 from programs.models import Program
 
+# PDM responses table for recipient feedback after assistance delivery.
 class PDMResponse(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     tenant = models.ForeignKey(Tenant, on_delete=models.PROTECT, related_name="pdm_responses")
@@ -26,6 +27,7 @@ class PDMResponse(models.Model):
         db_table = "core_pdmresponse"
 
 
+# Append-only audit table showing who changed data and when it happened.
 class AuditEvent(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     tenant = models.ForeignKey(Tenant, on_delete=models.PROTECT, related_name="audit_events")

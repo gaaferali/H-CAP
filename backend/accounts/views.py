@@ -7,21 +7,25 @@ from decimal import Decimal, ROUND_HALF_UP
 from django.core import signing
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.core.validators import validate_email
+from django.conf import settings
+from django.contrib.auth.password_validation import validate_password
 from django.db import transaction
 from django.db.models import Count, Q, Sum
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from openpyxl import load_workbook
 from rest_framework import status, viewsets
-from rest_framework.decorators import action, api_view, permission_classes
-from rest_framework.exceptions import PermissionDenied, ValidationError
+from rest_framework.decorators import action, api_view, permission_classes, throttle_classes
+from rest_framework.exceptions import AuthenticationFailed, PermissionDenied, ValidationError
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework_simplejwt.exceptions import TokenError
 from rest_framework_simplejwt.tokens import RefreshToken
+from rest_framework_simplejwt.serializers import TokenRefreshSerializer
 
 from accounts.models import IdempotencyRecord, Tenant, User
 from accounts.serializers import LoginSerializer, TenantSerializer, UserSerializer
+from accounts.throttles import LoginRateThrottle, RefreshRateThrottle
 from accounts.viewsets import RoleProtectedTenantViewSet, TenantScopedModelViewSet
 from assistance.models import Beneficiary, CashEntitlement, Enrollment, Household, HouseholdEligibility, HouseholdEnrollment
 from assistance.serializer_helpers import national_id_digest, national_id_reference, normalize_national_id, normalize_phone_number
@@ -43,6 +47,7 @@ from reporting.serializers import AuditEventSerializer
 
 
 
+# Registers and manages users inside the current tenant.
 class AdminOnlyTenantUserViewSet(TenantScopedModelViewSet):
     queryset = User.objects.all()
     serializer_class = UserSerializer
@@ -91,6 +96,7 @@ class AdminOnlyTenantUserViewSet(TenantScopedModelViewSet):
         audit(self.request.user, "USER_UPDATED", user, before=before, after=UserSerializer(user).data)
 
 
+# Lets platform administrators create and manage tenant organisations.
 class SystemTenantViewSet(viewsets.ModelViewSet):
     queryset = Tenant.objects.all()
     serializer_class = TenantSerializer
@@ -113,27 +119,66 @@ class SystemTenantViewSet(viewsets.ModelViewSet):
         audit(self.request.user, "TENANT_UPDATED", tenant, before=before, after=TenantSerializer(tenant).data, tenant=tenant)
 
 
+# Checks credentials and returns the user with a JWT access token.
 @api_view(["POST"])
 @permission_classes([AllowAny])
+@throttle_classes([LoginRateThrottle])
 def login_view(request):
     serializer = LoginSerializer(data=request.data)
     serializer.is_valid(raise_exception=True)
     user = serializer.validated_data["user"]
     refresh = RefreshToken.for_user(user)
-    return Response({"user": UserSerializer(user).data, "access": str(refresh.access_token), "refresh": str(refresh)})
+    response = Response({"user": UserSerializer(user).data, "access": str(refresh.access_token)})
+    response.set_cookie(
+        settings.JWT_REFRESH_COOKIE,
+        str(refresh),
+        httponly=True,
+        secure=settings.JWT_REFRESH_COOKIE_SECURE,
+        samesite="Strict",
+        max_age=int(settings.SIMPLE_JWT["REFRESH_TOKEN_LIFETIME"].total_seconds()),
+        path="/api/auth/",
+    )
+    return response
+
+
+@api_view(["POST"])
+@permission_classes([AllowAny])
+@throttle_classes([RefreshRateThrottle])
+def refresh_view(request):
+    refresh_token = request.COOKIES.get(settings.JWT_REFRESH_COOKIE)
+    if not refresh_token:
+        raise AuthenticationFailed("The secure refresh session is missing or expired.")
+    serializer = TokenRefreshSerializer(data={"refresh": refresh_token})
+    serializer.is_valid(raise_exception=True)
+    response = Response({"access": serializer.validated_data["access"]})
+    rotated = serializer.validated_data.get("refresh")
+    if rotated:
+        response.set_cookie(
+            settings.JWT_REFRESH_COOKIE,
+            rotated,
+            httponly=True,
+            secure=settings.JWT_REFRESH_COOKIE_SECURE,
+            samesite="Strict",
+            max_age=int(settings.SIMPLE_JWT["REFRESH_TOKEN_LIFETIME"].total_seconds()),
+            path="/api/auth/",
+        )
+    return response
 
 
 @api_view(["POST"])
 def logout_view(request):
-    refresh_token = request.data.get("refresh")
+    refresh_token = request.COOKIES.get(settings.JWT_REFRESH_COOKIE)
     if refresh_token:
         try:
             RefreshToken(refresh_token).blacklist()
         except TokenError:
             pass
-    return Response({"status": "signed_out"})
+    response = Response({"status": "signed_out"})
+    response.delete_cookie(settings.JWT_REFRESH_COOKIE, path="/api/auth/", samesite="Strict")
+    return response
 
 
+# Returns the currently signed-in user for frontend session recovery.
 @api_view(["GET"])
 def me_view(request):
     return Response(UserSerializer(request.user).data)
@@ -169,8 +214,10 @@ def profile_password_view(request):
     confirm_password = str(request.data.get("confirm_password") or "")
     if not request.user.check_password(current_password):
         raise ValidationError({"current_password": "Current password is incorrect."})
-    if len(new_password) < 8:
-        raise ValidationError({"new_password": "New password must contain at least 8 characters."})
+    try:
+        validate_password(new_password, user=request.user)
+    except DjangoValidationError as exc:
+        raise ValidationError({"new_password": list(exc.messages)}) from exc
     if new_password != confirm_password:
         raise ValidationError({"confirm_password": "New password confirmation does not match."})
     if request.user.check_password(new_password):

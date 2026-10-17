@@ -37,13 +37,17 @@ from reporting.models import AuditEvent
 
 
 
+# Returns warehouse names and program links used by stock forms.
 class WarehouseSerializer(serializers.ModelSerializer):
+    program_name = serializers.CharField(source="program.name", read_only=True)
+
     class Meta:
         model = Warehouse
         fields = "__all__"
         read_only_fields = ["created_by", "created_at"]
 
 
+# Validates NFI item details and returns readable program information.
 class NFIItemSerializer(serializers.ModelSerializer):
     program_name = serializers.CharField(source="program.name", read_only=True)
     warehouse_name = serializers.CharField(source="warehouse.name", read_only=True)
@@ -62,6 +66,7 @@ class NFIItemSerializer(serializers.ModelSerializer):
         return item.issues.aggregate(total=Sum("actual_quantity"))["total"] or 0
 
 
+# Checks enrollment and stock rules before saving an NFI entitlement.
 class NFIEntitlementSerializer(serializers.ModelSerializer):
     household_reference = serializers.SerializerMethodField()
     household_member_count = serializers.SerializerMethodField()
@@ -135,6 +140,7 @@ class StockMovementSerializer(serializers.ModelSerializer):
         read_only_fields = ["created_by", "created_at"]
 
 
+# Validates a distribution plan and returns readable program and warehouse names.
 class DistributionEventSerializer(serializers.ModelSerializer):
     program_name = serializers.CharField(source="program.name", read_only=True)
     warehouse_name = serializers.CharField(source="warehouse.name", read_only=True)
@@ -147,16 +153,17 @@ class DistributionEventSerializer(serializers.ModelSerializer):
     def validate(self, attrs):
         program = attrs.get("program") or self.instance.program
         warehouse = attrs.get("warehouse", self.instance.warehouse if self.instance else None)
-        if not program.nfi_enabled:
-            raise serializers.ValidationError({"program": "NFI assistance is disabled for this program"})
+        if not (program.nfi_enabled or program.medical_enabled):
+            raise serializers.ValidationError({"program": "NFI and Medical Assistance are disabled for this program"})
         if not warehouse or warehouse.program_id != program.id:
-            raise serializers.ValidationError({"warehouse": "Warehouse must belong to the selected NFI program"})
+            raise serializers.ValidationError({"warehouse": "Warehouse must belong to the selected program"})
         user = self.context["request"].user
         if not user.is_superuser and program.tenant_id != user.tenant_id:
             raise serializers.ValidationError("Program belongs to another tenant")
         return attrs
 
 
+# Checks that an entitlement can be assigned to the selected distribution event.
 class DistributionAllocationSerializer(serializers.ModelSerializer):
     household_reference = serializers.SerializerMethodField()
     household_member_count = serializers.SerializerMethodField()
@@ -166,6 +173,7 @@ class DistributionAllocationSerializer(serializers.ModelSerializer):
     national_id_reference = serializers.SerializerMethodField()
     item_name = serializers.CharField(source="item.name", read_only=True)
     program_name = serializers.CharField(source="event.program.name", read_only=True)
+    program_id = serializers.UUIDField(source="event.program_id", read_only=True)
     warehouse_name = serializers.CharField(source="event.warehouse.name", read_only=True, allow_null=True)
     event_date = serializers.DateField(source="event.event_date", read_only=True)
     event_location = serializers.CharField(source="event.location", read_only=True)
@@ -212,6 +220,7 @@ class DistributionAllocationSerializer(serializers.ModelSerializer):
         return household_member_details(allocation.household or allocation.entitlement.household)
 
 
+# Validates the final delivery record and returns readable recipient details.
 class DistributionIssueSerializer(serializers.ModelSerializer):
     household_reference = serializers.SerializerMethodField()
     household_member_count = serializers.SerializerMethodField()
@@ -221,6 +230,7 @@ class DistributionIssueSerializer(serializers.ModelSerializer):
     national_id_reference = serializers.SerializerMethodField()
     item_name = serializers.CharField(source="item.name", read_only=True)
     program_name = serializers.CharField(source="event.program.name", read_only=True)
+    program_id = serializers.UUIDField(source="event.program_id", read_only=True)
     warehouse_name = serializers.CharField(source="event.warehouse.name", read_only=True, allow_null=True)
     event_date = serializers.DateField(source="event.event_date", read_only=True)
     event_location = serializers.CharField(source="event.location", read_only=True)

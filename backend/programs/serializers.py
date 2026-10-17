@@ -37,13 +37,17 @@ from reporting.models import AuditEvent
 
 
 
+# Validates program setup and returns its enabled assistance configuration.
 class ProgramSerializer(serializers.ModelSerializer):
     tenant_name = serializers.CharField(source="tenant.name", read_only=True)
 
     class Meta:
         model = Program
         fields = "__all__"
-        read_only_fields = ["tenant", "created_by", "created_at"]
+        read_only_fields = [
+            "tenant", "created_by", "created_at", "status", "status_reason",
+            "status_changed_at", "status_changed_by",
+        ]
         extra_kwargs = {
             "transfer_amount": {"required": False, "allow_null": True},
             "payment_cycle": {"required": False, "allow_blank": True},
@@ -51,7 +55,22 @@ class ProgramSerializer(serializers.ModelSerializer):
 
     def validate(self, attrs):
         cash_enabled = attrs.get("cash_enabled", self.instance.cash_enabled if self.instance else True)
+        nfi_enabled = attrs.get("nfi_enabled", self.instance.nfi_enabled if self.instance else False)
+        medical_enabled = attrs.get("medical_enabled", self.instance.medical_enabled if self.instance else False)
         payment_cycle = attrs.get("payment_cycle", self.instance.payment_cycle if self.instance else "")
+        if not any([cash_enabled, nfi_enabled, medical_enabled]):
+            raise serializers.ValidationError(
+                "Enable at least one implemented assistance modality: Payment/Cash, NFI, or Medical Assistance."
+            )
+        if self.instance:
+            if self.instance.cash_enabled and not cash_enabled and CashEntitlement.objects.filter(program=self.instance).exists():
+                raise serializers.ValidationError({"cash_enabled": "Cash cannot be disabled after cash entitlement history exists."})
+            if self.instance.nfi_enabled and not nfi_enabled and NFIEntitlement.objects.filter(program=self.instance).exists():
+                raise serializers.ValidationError({"nfi_enabled": "NFI cannot be disabled after NFI entitlement history exists."})
+            if self.instance.medical_enabled and not medical_enabled:
+                from medical.models import MedicalBatch, MedicalEntitlement
+                if MedicalEntitlement.objects.filter(program=self.instance).exists() or MedicalBatch.objects.filter(program=self.instance).exists():
+                    raise serializers.ValidationError({"medical_enabled": "Medical Assistance cannot be disabled after medical inventory or entitlement history exists."})
         if cash_enabled:
             if not payment_cycle:
                 raise serializers.ValidationError({"payment_cycle": "Payment cycle is required when Payment/Cash is enabled."})
@@ -66,6 +85,7 @@ class ProgramSerializer(serializers.ModelSerializer):
         return attrs
 
 
+# Validates activity dates, ownership, and program lifecycle rules.
 class ProgramActivitySerializer(serializers.ModelSerializer):
     program_name = serializers.CharField(source="program.name", read_only=True)
     owner_name = serializers.CharField(source="owner.full_name", read_only=True)
@@ -117,6 +137,7 @@ class ActivityDependencySerializer(serializers.ModelSerializer):
         return attrs
 
 
+# Returns the cash program budget with calculated financial totals.
 class BudgetSerializer(serializers.ModelSerializer):
     program_name = serializers.CharField(source="program.name", read_only=True)
     used_amount = serializers.SerializerMethodField()

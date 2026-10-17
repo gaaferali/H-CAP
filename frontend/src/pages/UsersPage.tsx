@@ -1,10 +1,9 @@
-import { FormEvent, ReactNode, useEffect, useMemo, useState } from "react";
+import { FormEvent, useEffect, useState } from "react";
 import { api, listItems } from "../api/api";
 import type { PlatformUser } from "../api/api";
 import type { Entity, Role } from "../types/types";
-import { Badge, Field, FunctionHelp, Message, Panel, SelectField, Table, Textarea } from "../components";
-import { TranslateTree, useTranslation } from "../i18n";
-import { beneficiaryLabel, distributionEventLabel, enrollmentLabel, householdLabel, nfiBeneficiaryLabel, nfiEntitlementLabel, programLabel, readableCode, valueOf } from "../utils";
+import { Badge, Field, Message, Panel, SelectField, Table } from "../components";
+// Shows tenant users and the form used to register a new platform user.
 export function UsersPage({ system }: { system: boolean }) {
   const [users, setUsers] = useState<PlatformUser[]>([]);
   const [tenants, setTenants] = useState<Entity[]>([]);
@@ -21,6 +20,7 @@ export function UsersPage({ system }: { system: boolean }) {
         "AUDITOR",
       ]
     : ["FIELD_OFFICER", "FINANCE", "REVIEWER", "SUPPORT", "AUDITOR"];
+  // Gets users and returns tenant choices only for a platform administrator.
   const load = async () => {
     try {
       setUsers(listItems(await api.users()));

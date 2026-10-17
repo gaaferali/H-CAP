@@ -12,8 +12,6 @@ export const householdLabel = (household: Entity) =>
   `${valueOf(household, "registration_reference") || "Household"} — ${valueOf(household, "program_name") || "Program"} — ${valueOf(household, "location") || "Location not recorded"} — size ${valueOf(household, "household_size") || "?"}`;
 export const beneficiaryLabel = (beneficiary: Entity) =>
   `${valueOf(beneficiary, "national_id_reference") || "National ID"} — ${beneficiary.full_name || "Unnamed"}`;
-export const enrollmentLabel = (enrollment: Entity) =>
-  `${valueOf(enrollment, "beneficiary_number") || "Beneficiary"} — ${valueOf(enrollment, "beneficiary_name") || "Unnamed"} (${valueOf(enrollment, "program_name") || "Program"})`;
 export const nfiBeneficiaryLabel = (record: Entity) => {
   const nationalIdReference = valueOf(record, "national_id_reference");
   return [

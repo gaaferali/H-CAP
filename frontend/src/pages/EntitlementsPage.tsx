@@ -1,11 +1,81 @@
-import { FormEvent, ReactNode, useEffect, useMemo, useState } from "react";
+import { FormEvent, useEffect, useState } from "react";
 import { api, listItems } from "../api/api";
-import type { PlatformUser } from "../api/api";
 import type { Entity, Role } from "../types/types";
-import { Badge, Field, FunctionHelp, Message, Panel, SelectField, Table, Textarea } from "../components";
-import { TranslateTree, useTranslation } from "../i18n";
-import { beneficiaryLabel, distributionEventLabel, enrollmentLabel, householdLabel, nfiBeneficiaryLabel, nfiEntitlementLabel, programLabel, readableCode, valueOf } from "../utils";
-export function EntitlementsPage({ role }: { role: Role }) {
+import { Badge, Field, Message, Panel, SelectField, Table } from "../components";
+import { nfiBeneficiaryLabel, programLabel, valueOf } from "../utils";
+import { MedicalPage } from "./MedicalPage";
+
+type EntitlementModality = "CASH" | "NFI" | "MEDICAL";
+
+function EntitlementTabs({ value, onChange }: { value: EntitlementModality; onChange: (value: EntitlementModality) => void }) {
+  return (
+    <div className="workspace-tabs" role="tablist" aria-label="Assistance modality">
+      {(["CASH", "NFI", "MEDICAL"] as EntitlementModality[]).map((modality) => (
+        <button key={modality} type="button" className={`btn ${value === modality ? "btn-primary" : "btn-outline-primary"}`} onClick={() => onChange(modality)}>
+          {modality === "CASH" ? "Cash" : modality === "NFI" ? "NFI" : "Medical"}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+// Shows saved cash entitlements and the actions allowed for the current role.
+function CashEntitlementsPanel({ role }: { role: Role }) {
+  const [rows, setRows] = useState<Entity[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const loadCash = () => {
+    setLoading(true);
+    api.list<Entity>("cash-entitlements")
+      .then((response) => setRows(listItems(response)))
+      .catch((reason) => setError(reason instanceof Error ? reason.message : "Could not load cash entitlements."))
+      .finally(() => setLoading(false));
+  };
+  useEffect(() => {
+    loadCash();
+  }, []);
+  const canWrite = ["ADMIN", "MANAGER", "FINANCE"].includes(role);
+  const correct = async (row: Entity) => {
+    const amount = window.prompt("Enter the corrected cash amount:", valueOf(row, "amount"));
+    if (!amount) return;
+    const reason = window.prompt("Enter the audit reason for this correction:");
+    if (!reason) return;
+    try {
+      await api.action(`/cash-entitlements/${row.id}/correct/`, { amount, reason });
+      loadCash();
+    } catch (reasonValue) {
+      setError(reasonValue instanceof Error ? reasonValue.message : "Could not correct the cash entitlement.");
+    }
+  };
+  const cancel = async (row: Entity) => {
+    const reason = window.prompt("Enter the audit reason for cancelling this cash entitlement:");
+    if (!reason) return;
+    try {
+      await api.action(`/cash-entitlements/${row.id}/cancel/`, { reason });
+      loadCash();
+    } catch (reasonValue) {
+      setError(reasonValue instanceof Error ? reasonValue.message : "Could not cancel the cash entitlement.");
+    }
+  };
+  return (
+    <Panel title="Cash entitlements">
+      <p className="section-lead">Cash amounts are created and submitted from the Payments page. This shared view is for review and status tracking.</p>
+      <a className="btn btn-primary mb-3" href="#/payments">Open Payments</a>
+      <Table loading={loading} headings={["Program", "Household", "Amount", "Currency", "Status", "Actions"]} rows={rows.map((row) => [
+        valueOf(row, "program_name") || "Program",
+        valueOf(row, "household_reference") || "Household",
+        valueOf(row, "amount"),
+        valueOf(row, "currency"),
+        <Badge value={valueOf(row, "status")} />,
+        canWrite && valueOf(row, "status") === "ACTIVE" ? <div className="d-flex flex-wrap gap-1"><button type="button" className="btn btn-sm btn-outline-primary" onClick={() => void correct(row)}>Correct</button><button type="button" className="btn btn-sm btn-outline-danger" onClick={() => void cancel(row)}>Cancel</button></div> : "—",
+      ])} />
+      <Message status="" error={error} />
+    </Panel>
+  );
+}
+
+// Gets eligible NFI beneficiaries and shows the saved item entitlements.
+function NfiEntitlementsPanel({ role }: { role: Role }) {
   const [programs, setPrograms] = useState<Entity[]>([]);
   const [enrollments, setEnrollments] = useState<Entity[]>([]);
   const [warehouses, setWarehouses] = useState<Entity[]>([]);
@@ -58,7 +128,8 @@ export function EntitlementsPage({ role }: { role: Role }) {
       Boolean(valueOf(row, "household")) &&
       valueOf(row, "program") === programId &&
       ["ACCEPTED", "APPROVED"].includes(valueOf(row, "status")) &&
-      ["NFI", "CASH_NFI"].includes(valueOf(row, "assistance_modality")),
+      (["NFI", "CASH_NFI"].includes(valueOf(row, "assistance_modality")) ||
+        ((row.modality_decision_details as Entity[] | undefined) ?? []).some((decision) => valueOf(decision, "modality") === "NFI" && valueOf(decision, "status") === "APPROVED")),
   );
   const eligibleHouseholds = validEnrollments.filter(
     (row, index, all) =>
@@ -107,6 +178,17 @@ export function EntitlementsPage({ role }: { role: Role }) {
   const canWrite = ["ADMIN", "MANAGER", "FINANCE"].includes(
     role,
   );
+  const cancel = async (row: Entity) => {
+    const reason = window.prompt("Enter the audit reason for cancelling this NFI entitlement:");
+    if (!reason) return;
+    try {
+      await api.action(`/nfi-entitlements/${row.id}/cancel/`, { reason });
+      await load();
+      setStatus("saved");
+    } catch (reasonValue) {
+      setError(reasonValue instanceof Error ? reasonValue.message : "Could not cancel the NFI entitlement.");
+    }
+  };
   return (
     <div className="row g-3">
       <div className="col-12">
@@ -141,7 +223,7 @@ export function EntitlementsPage({ role }: { role: Role }) {
                 name="household"
                 options={eligibleHouseholds.map((row) => ({
                   value: valueOf(row, "household"),
-                  label: `${valueOf(row, "household_reference") || "Household"} â€” ${valueOf(row, "household_size") || "?"} household size â€” ${valueOf(row, "member_count") || 0} members â€” ${valueOf(row, "assistance_modality")}`,
+                  label: `${valueOf(row, "household_reference") || "Household"} — ${valueOf(row, "household_size") || "?"} household size — ${valueOf(row, "member_count") || 0} members — ${valueOf(row, "assistance_modality")}`,
                 }))}
                 value={householdId}
                 onChange={setHouseholdId}
@@ -157,7 +239,7 @@ export function EntitlementsPage({ role }: { role: Role }) {
                 name="warehouse"
                 options={programWarehouses.map((row) => ({
                   value: row.id,
-                  label: `${row.name} â€” ${valueOf(row, "location")}`,
+                  label: `${row.name} — ${valueOf(row, "location")}`,
                 }))}
                 value={warehouseId}
                 onChange={(value) => {
@@ -205,6 +287,7 @@ export function EntitlementsPage({ role }: { role: Role }) {
               "Warehouse",
               "Quantity",
               "Status",
+              "Actions",
             ]}
             rows={entitlements.map((row) => [
               valueOf(row, "program_name") || "Program",
@@ -221,10 +304,31 @@ export function EntitlementsPage({ role }: { role: Role }) {
               valueOf(row, "warehouse_name") || "Warehouse",
               valueOf(row, "quantity"),
               <Badge value={valueOf(row, "status")} />,
+              canWrite && valueOf(row, "status") === "ACTIVE" ? <button type="button" className="btn btn-sm btn-outline-danger" onClick={() => void cancel(row)}>Cancel</button> : "—",
             ])}
           />
         </Panel>
         {!canWrite && <Message status="" error={error} />}
+      </div>
+    </div>
+  );
+}
+
+// Switches between cash, NFI, and medical entitlement workspaces.
+export function EntitlementsPage({ role, initialModality = "NFI" }: { role: Role; initialModality?: EntitlementModality }) {
+  const [modality, setModality] = useState<EntitlementModality>(initialModality);
+  return (
+    <div className="row g-3">
+      <div className="col-12">
+        <Panel title="Entitlements">
+          <p className="section-lead">Review Cash, NFI, and Medical assistance in one workspace. Select a modality to see only the relevant controls and records.</p>
+          <EntitlementTabs value={modality} onChange={setModality} />
+        </Panel>
+      </div>
+      <div className="col-12">
+        {modality === "CASH" && <CashEntitlementsPanel role={role} />}
+        {modality === "NFI" && <NfiEntitlementsPanel role={role} />}
+        {modality === "MEDICAL" && <MedicalPage role={role} view="entitlements" />}
       </div>
     </div>
   );

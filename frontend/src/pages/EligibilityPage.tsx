@@ -1,38 +1,34 @@
-import { FormEvent, ReactNode, useEffect, useMemo, useState } from "react";
+import { FormEvent, useEffect, useState } from "react";
 import { api, listItems } from "../api/api";
-import type { PlatformUser } from "../api/api";
 import type { Entity, Role } from "../types/types";
-import { Badge, Field, FunctionHelp, Message, Panel, SelectField, Table, Textarea } from "../components";
-import { TranslateTree, useTranslation } from "../i18n";
-import { beneficiaryLabel, distributionEventLabel, enrollmentLabel, householdLabel, nfiBeneficiaryLabel, nfiEntitlementLabel, programLabel, readableCode, valueOf } from "../utils";
+import { Badge, Message, Panel, SelectField, Table } from "../components";
+import { householdLabel, programLabel, valueOf } from "../utils";
+// Shows household eligibility decisions with the related human review information.
 export function EligibilityPage({ role }: { role: Role }) {
   const [programs, setPrograms] = useState<Entity[]>([]);
   const [households, setHouseholds] = useState<Entity[]>([]);
   const [selectedProgram, setSelectedProgram] = useState("");
   const [eligibility, setEligibility] = useState<Entity[]>([]);
-  const [enrollments, setEnrollments] = useState<Entity[]>([]);
   const [signals, setSignals] = useState<Entity[]>([]);
   const [tasks, setTasks] = useState<Entity[]>([]);
   const [status, setStatus] = useState("");
   const [error, setError] = useState("");
   const canDecide = role !== "FINANCE";
+  // Gets programs, households, eligibility records, and permitted review signals.
   const load = async () => {
     try {
       const [
         programResponse,
         householdResponse,
         eligibilityResponse,
-        enrollmentResponse,
       ] = await Promise.all([
         api.list<Entity>("programs"),
         api.list<Entity>("households"),
         api.list<Entity>("household-eligibility"),
-        api.list<Entity>("household-enrollments"),
       ]);
       setPrograms(listItems(programResponse));
       setHouseholds(listItems(householdResponse));
       setEligibility(listItems(eligibilityResponse));
-      setEnrollments(listItems(enrollmentResponse));
       if (canDecide) {
         const [signalResponse, taskResponse] = await Promise.all([
           api.list<Entity>("ai-signals"),

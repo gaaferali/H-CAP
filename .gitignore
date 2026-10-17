@@ -1,9 +1,28 @@
 .venv/
+.locust-venv/
 backend/**/__pycache__/
 backend/**/*.pyc
 frontend/node_modules/
 frontend/dist/
+*.tsbuildinfo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
 #backend/core/test_modality_matrix.py
 HCAP_MVP
 .vscode/
-
+# Real environment files and credentials are local-only.
+.env
+*.env
+**/.env
+**/*.env
+!.env.example
+!**/.env.example
+# Local performance/load-testing tools and generated reports are not shipped.
+loadtests/
+locust-results/
+**/locustfile.py
+locust_*.csv
+locust_*.html

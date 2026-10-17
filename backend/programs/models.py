@@ -7,6 +7,7 @@ from django.utils import timezone as django_timezone
 
 from accounts.models import Tenant, User
 
+# Programs table with the enabled assistance types and lifecycle status.
 class Program(models.Model):
     class Cycle(models.TextChoices):
         ONE_TIME = "ONE_TIME", "One time"
@@ -33,6 +34,15 @@ class Program(models.Model):
     transfer_amount = models.DecimalField(max_digits=18, decimal_places=2, null=True, blank=True, validators=[MinValueValidator(0.01)])
     payment_cycle = models.CharField(max_length=20, choices=Cycle.choices, blank=True)
     status = models.CharField(max_length=20, choices=Status.choices, default=Status.DRAFT)
+    status_reason = models.TextField(blank=True)
+    status_changed_at = models.DateTimeField(null=True, blank=True)
+    status_changed_by = models.ForeignKey(
+        User,
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="program_status_changes",
+    )
     workflow_config = models.JSONField(default=dict, blank=True, encoder=DjangoJSONEncoder)
     country_pack = models.JSONField(default=dict, blank=True, encoder=DjangoJSONEncoder)
     start_date = models.DateField(null=True, blank=True)
@@ -41,12 +51,14 @@ class Program(models.Model):
     created_at = models.DateTimeField(default=django_timezone.now)
     cash_enabled = models.BooleanField(default=True)
     nfi_enabled = models.BooleanField(default=False)
+    medical_enabled = models.BooleanField(default=False)
     other_assistance_enabled = models.BooleanField(default=False)
 
     class Meta:
         db_table = "core_program"
 
 
+# Program activities table used to plan and follow operational work.
 class ProgramActivity(models.Model):
     class Status(models.TextChoices):
         NOT_STARTED = "NOT_STARTED", "Not started"
@@ -83,6 +95,7 @@ class ProgramActivity(models.Model):
         ]
 
 
+# Links activities that must be completed in a specific order.
 class ActivityDependency(models.Model):
     class Relationship(models.TextChoices):
         FINISH_TO_START = "FS", "Finish to start"
@@ -101,6 +114,7 @@ class ActivityDependency(models.Model):
         constraints = [models.UniqueConstraint(fields=["predecessor", "successor"], name="unique_activity_dependency")]
 
 
+# Stores the payment budget configured for a cash-enabled program.
 class Budget(models.Model):
     class Status(models.TextChoices):
         DRAFT = "DRAFT", "Draft"

@@ -1,10 +1,9 @@
-import { FormEvent, ReactNode, useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import { api, listItems } from "../api/api";
-import type { PlatformUser } from "../api/api";
-import type { Entity, Role } from "../types/types";
-import { Badge, Field, FunctionHelp, Message, Panel, SelectField, Table, Textarea } from "../components";
-import { TranslateTree, useTranslation } from "../i18n";
-import { beneficiaryLabel, distributionEventLabel, enrollmentLabel, householdLabel, nfiBeneficiaryLabel, nfiEntitlementLabel, programLabel, readableCode, valueOf } from "../utils";
+import type { Entity } from "../types/types";
+import { Message, Panel, Table } from "../components";
+import { valueOf } from "../utils";
+// Shows the append-only audit history returned by the reporting API.
 export function AuditPage() {
   const [events, setEvents] = useState<Entity[]>([]);
   const [error, setError] = useState("");

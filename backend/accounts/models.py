@@ -5,6 +5,7 @@ from django.core.serializers.json import DjangoJSONEncoder
 from django.db import models
 from django.utils import timezone as django_timezone
 
+# Tenants table used to keep each organisation's data separate.
 class Tenant(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     name = models.CharField(max_length=255)
@@ -20,6 +21,7 @@ class Tenant(models.Model):
         db_table = "core_tenant"
 
 
+# Stores completed API operations so the same request does not create duplicate data.
 class IdempotencyRecord(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     tenant = models.ForeignKey("Tenant", on_delete=models.PROTECT, related_name="idempotency_records")
@@ -36,6 +38,7 @@ class IdempotencyRecord(models.Model):
         constraints = [models.UniqueConstraint(fields=["tenant", "actor", "endpoint", "idempotency_key"], name="unique_idempotency_request")]
 
 
+# Tracks offline registration operations until they are safely synchronized.
 class SyncOperation(models.Model):
     class Status(models.TextChoices):
         APPLIED = "APPLIED", "Applied"
@@ -85,6 +88,7 @@ class UserManager(BaseUserManager):
         return self.create_user(email, full_name, tenant, password, **extra_fields)
 
 
+# Users table for login, roles, and tenant access.
 class User(AbstractBaseUser, PermissionsMixin):
     class Role(models.TextChoices):
         ADMIN = "ADMIN", "Admin"

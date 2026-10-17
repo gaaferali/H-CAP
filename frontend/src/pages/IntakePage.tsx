@@ -1,11 +1,12 @@
-import { FormEvent, ReactNode, useEffect, useMemo, useState } from "react";
+import { FormEvent, useEffect, useState } from "react";
 import { api, listItems } from "../api/api";
-import type { PlatformUser } from "../api/api";
 import type { Entity, Role } from "../types/types";
-import { Badge, Field, FunctionHelp, Message, Panel, SelectField, Table, Textarea } from "../components";
-import { TranslateTree, useTranslation } from "../i18n";
-import { beneficiaryLabel, distributionEventLabel, enrollmentLabel, householdLabel, nfiBeneficiaryLabel, nfiEntitlementLabel, programLabel, readableCode, valueOf } from "../utils";
+import { Badge, Field, Message, Panel, SelectField, Table } from "../components";
+import { useTranslation } from "../i18n";
+import { beneficiaryLabel, householdLabel, programLabel, valueOf } from "../utils";
+// Shows household or beneficiary registration after loading the related program data.
 export function Intake({ beneficiary, role }: { beneficiary: boolean; role: Role }) {
+  const translate = useTranslation();
   const resource = beneficiary ? "beneficiaries" : "households";
   const title = beneficiary ? "Register beneficiary" : "Register household";
   const [records, setRecords] = useState<Entity[]>([]);
@@ -17,11 +18,13 @@ export function Intake({ beneficiary, role }: { beneficiary: boolean; role: Role
       ? (sessionStorage.getItem("hcap_selected_household_id") ?? "")
       : "",
   );
-  const [beneficiaryToDelete, setBeneficiaryToDelete] = useState("");
   const [createdHousehold, setCreatedHousehold] = useState<Entity | null>(null);
   const [status, setStatus] = useState("");
   const [error, setError] = useState("");
+  const [formOpen, setFormOpen] = useState(!beneficiary);
+  const [search, setSearch] = useState("");
   const canWrite = !["FINANCE", "REVIEWER", "AUDITOR"].includes(role);
+  // Gets saved records, programs, and households used by the form and table.
   const load = async () => {
     try {
       const [recordResponse, programResponse, householdResponse] = await Promise.all([
@@ -85,6 +88,7 @@ export function Intake({ beneficiary, role }: { beneficiary: boolean; role: Role
       }
       formElement.reset();
       await load();
+      if (beneficiary) setFormOpen(false);
       setStatus("saved");
     } catch (reason) {
       setStatus("failed");
@@ -100,19 +104,24 @@ export function Intake({ beneficiary, role }: { beneficiary: boolean; role: Role
     sessionStorage.setItem("hcap_selected_household_id", createdHousehold.id);
     location.hash = "#/intake/beneficiaries";
   };
-  const canDeleteBeneficiary =
+  const canExitBeneficiary =
     beneficiary && ["ADMIN", "MANAGER"].includes(role);
-  const deleteBeneficiary = async (record: Entity) => {
-    if (
-      !window.confirm(
-        `Delete ${beneficiaryLabel(record)} and all associated enrollments, payment instructions, payment events, complaints, and related records? If this is the household's last beneficiary, the empty household will also be deleted. This cannot be undone.`,
-      )
-    )
-      return;
+  const visibleRecords = records.filter((record) => {
+    const household = households.find((row) => row.id === valueOf(record, "household"));
+    const recordProgram = valueOf(record, "program") || valueOf(household, "program");
+    const matchesProgram = !selectedProgram || recordProgram === selectedProgram;
+    const needle = search.trim().toLowerCase();
+    const matchesSearch = !needle || [record.full_name, record.number, record.registration_reference, record.location]
+      .some((value) => String(value ?? "").toLowerCase().includes(needle));
+    return matchesProgram && matchesSearch;
+  });
+  const exitBeneficiary = async (record: Entity) => {
+    const reason = window.prompt(`Enter the audit reason for exiting ${beneficiaryLabel(record)} from future assistance:`);
+    if (!reason) return;
     setStatus("saving");
     setError("");
     try {
-      await api.remove("beneficiaries", record.id);
+      await api.action(`/beneficiaries/${record.id}/exit/`, { reason });
       await load();
       setStatus("saved");
     } catch (reason) {
@@ -120,13 +129,29 @@ export function Intake({ beneficiary, role }: { beneficiary: boolean; role: Role
       setError(
         reason instanceof Error
           ? reason.message
-          : "The beneficiary could not be deleted.",
+          : "The beneficiary could not be exited.",
       );
+    }
+  };
+  const withdrawHousehold = async (record: Entity) => {
+    const reason = window.prompt(`Enter the audit reason for withdrawing ${householdLabel(record)} from this program:`);
+    if (!reason) return;
+    setStatus("saving");
+    setError("");
+    try {
+      await api.action(`/households/${record.id}/withdraw/`, { reason });
+      await load();
+      setStatus("saved");
+    } catch (reasonValue) {
+      setStatus("failed");
+      setError(reasonValue instanceof Error ? reasonValue.message : "The household could not be withdrawn.");
     }
   };
   if (beneficiary && role === "REVIEWER")
     return (
       <Panel title="Beneficiaries">
+        <SelectField label="Program" name="review-program" options={programs.map((program) => ({ value: program.id, label: programLabel(program) }))} value={selectedProgram} onChange={setSelectedProgram} />
+        <input className="form-control mb-3" aria-label={translate("Search beneficiaries")} placeholder={translate("Search by name or beneficiary number")} value={search} onChange={(event) => setSearch(event.target.value)} />
         <Table
           headings={[
             "National ID",
@@ -137,7 +162,7 @@ export function Intake({ beneficiary, role }: { beneficiary: boolean; role: Role
             "Program",
             "Verification",
           ]}
-          rows={records.map((record) => [
+          rows={visibleRecords.map((record) => [
             valueOf(record, "national_id_reference") || "—",
             valueOf(record, "household_reference") || "Household",
             record.full_name ?? "—",
@@ -155,26 +180,19 @@ export function Intake({ beneficiary, role }: { beneficiary: boolean; role: Role
       </Panel>
     );
   return (
-    <div className="row g-3">
-      {canWrite && <div className="col-xl-5">
+    <div className="row g-3 stacked-sections">
+      {beneficiary && <div className="col-12">
+        <Panel title="Beneficiary registration">
+          <SelectField label="Program" name="beneficiary-program-filter" options={programs.filter((program) => valueOf(program, "status") === "ACTIVE").map((program) => ({ value: program.id, label: programLabel(program) }))} value={selectedProgram} onChange={(value) => { setSelectedProgram(value); setSelectedHousehold(""); setFormOpen(false); }} required />
+          {selectedProgram && <p className="form-text">{programLabel(programs.find((row) => row.id === selectedProgram) ?? { id: selectedProgram })} — only households and beneficiaries from this program are shown.</p>}
+          {canWrite && selectedProgram && <button type="button" className="btn btn-primary" onClick={() => setFormOpen((open) => !open)}>{formOpen ? "Close beneficiary form" : "Add beneficiary"}</button>}
+        </Panel>
+      </div>}
+      {canWrite && (!beneficiary || (selectedProgram && formOpen)) && <div className="col-12">
         <Panel title={title}>
-          <form onSubmit={save}>
+          <form className="workflow-form" onSubmit={save}>
             {beneficiary ? (
               <>
-                <SelectField
-                  label="Program"
-                  name="program"
-                  options={programs.map((program) => ({
-                    value: program.id,
-                    label: programLabel(program),
-                  }))}
-                  value={selectedProgram}
-                  onChange={(value) => {
-                    setSelectedProgram(value);
-                    setSelectedHousehold("");
-                  }}
-                  required
-                />
                 <SelectField
                   label="Household"
                   name="household"
@@ -263,8 +281,9 @@ export function Intake({ beneficiary, role }: { beneficiary: boolean; role: Role
           <Message status={status} error={error} />
         </Panel>
       </div>}
-      <div className={canWrite ? "col-xl-7" : "col-12"}>
+      <div className="col-12">
         <Panel title={beneficiary ? "Beneficiaries" : "Households"}>
+          <input className="form-control mb-3" aria-label={translate("Search records")} placeholder={translate(beneficiary ? "Search by name or beneficiary number" : "Search by reference or location")} value={search} onChange={(event) => setSearch(event.target.value)} />
           {beneficiary ? (
             <Table
               headings={[
@@ -277,7 +296,7 @@ export function Intake({ beneficiary, role }: { beneficiary: boolean; role: Role
                 "Verification",
                 "Actions",
               ]}
-              rows={records.map((record) => [
+              rows={visibleRecords.map((record) => [
                 valueOf(record, "national_id_reference") || "—",
                 valueOf(record, "household_reference") || "Household",
                 record.full_name ?? "—",
@@ -289,12 +308,12 @@ export function Intake({ beneficiary, role }: { beneficiary: boolean; role: Role
                 <Badge
                   value={valueOf(record, "verification_status") || "PENDING"}
                 />,
-                canDeleteBeneficiary ? (
+                canExitBeneficiary && valueOf(record, "status") !== "EXITED" ? (
                   <button
                     className="btn btn-sm btn-outline-danger"
-                    onClick={() => void deleteBeneficiary(record)}
+                    onClick={() => void exitBeneficiary(record)}
                   >
-                    Delete
+                    Exit from future assistance
                   </button>
                 ) : (
                   "—"
@@ -310,14 +329,18 @@ export function Intake({ beneficiary, role }: { beneficiary: boolean; role: Role
                 "Location",
                 "Registration date",
                 "Status",
+                "Actions",
               ]}
-              rows={records.map((record) => [
+              rows={visibleRecords.map((record) => [
                 valueOf(record, "registration_reference") || "System reference",
                 valueOf(record, "program_name") || "Program",
                 valueOf(record, "household_size"),
                 valueOf(record, "location"),
                 valueOf(record, "registration_date"),
-                <Badge value="REGISTERED" />,
+                <Badge value={valueOf(record, "participation_status") || "ACTIVE"} />,
+                ["ADMIN", "MANAGER"].includes(role) && valueOf(record, "participation_status") !== "WITHDRAWN" ? (
+                  <button className="btn btn-sm btn-outline-danger" onClick={() => void withdrawHousehold(record)}>Withdraw</button>
+                ) : "—",
               ])}
             />
           )}

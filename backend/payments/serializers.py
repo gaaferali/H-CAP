@@ -37,6 +37,7 @@ from reporting.models import AuditEvent
 
 
 
+# Validates the simulated payment channel configured for a cash program.
 class PaymentChannelConfigSerializer(serializers.ModelSerializer):
     program_name = serializers.CharField(source="program.name", read_only=True)
 
@@ -57,8 +58,10 @@ class PaymentChannelConfigSerializer(serializers.ModelSerializer):
         return attrs
 
 
+# Validates payment creation and returns readable household and program details.
 class PaymentInstructionSerializer(serializers.ModelSerializer):
     beneficiary_name = serializers.SerializerMethodField()
+    program_id = serializers.SerializerMethodField()
     program_name = serializers.SerializerMethodField()
     household_reference = serializers.SerializerMethodField()
     household_member_count = serializers.SerializerMethodField()
@@ -125,12 +128,11 @@ class PaymentInstructionSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError(
                 {"household": "Household must have eligible status"}
             )
-        approved_enrollment = HouseholdEnrollment.objects.filter(
-            household=household,
-            program=program,
-            status=HouseholdEnrollment.Status.APPROVED,
-            assistance_modality__in=[Enrollment.AssistanceModality.CASH, Enrollment.AssistanceModality.CASH_NFI],
-        ).exists()
+        approved_enrollment = approved_household_modality(
+            household,
+            program,
+            [Enrollment.AssistanceModality.CASH, Enrollment.AssistanceModality.CASH_NFI],
+        )
         if not approved_enrollment:
             raise serializers.ValidationError({"household": "Payment instruction requires an approved household cash enrollment"})
         if not channel_config or channel_config.program_id != program.id or not channel_config.is_active:
@@ -174,6 +176,11 @@ class PaymentInstructionSerializer(serializers.ModelSerializer):
             return instruction.cash_entitlement.program.name
         return instruction.enrollment.program.name if instruction.enrollment_id else None
 
+    def get_program_id(self, instruction):
+        if instruction.cash_entitlement_id:
+            return str(instruction.cash_entitlement.program_id)
+        return str(instruction.enrollment.program_id) if instruction.enrollment_id else None
+
     def get_household(self, instruction):
         if instruction.cash_entitlement_id:
             return instruction.cash_entitlement.household
@@ -198,6 +205,7 @@ class PaymentInstructionSerializer(serializers.ModelSerializer):
         return instruction.amount + instruction.applied_fee
 
 
+# Returns the readable append-only history for a payment instruction.
 class PaymentEventSerializer(serializers.ModelSerializer):
     action = serializers.CharField(source="event_type", read_only=True)
     actor_name = serializers.CharField(source="recorded_by.full_name", read_only=True)
@@ -205,6 +213,7 @@ class PaymentEventSerializer(serializers.ModelSerializer):
     household_size = serializers.SerializerMethodField()
     household_members = serializers.SerializerMethodField()
     program_name = serializers.CharField(source="instruction.cash_entitlement.program.name", read_only=True)
+    program_id = serializers.SerializerMethodField()
     payment_amount = serializers.DecimalField(source="instruction.amount", max_digits=18, decimal_places=2, read_only=True)
     fee_amount = serializers.DecimalField(source="instruction.applied_fee", max_digits=18, decimal_places=2, read_only=True)
     total_financial_impact = serializers.SerializerMethodField()
@@ -216,6 +225,12 @@ class PaymentEventSerializer(serializers.ModelSerializer):
 
     def get_household(self, event):
         return event.instruction.cash_entitlement.household if event.instruction.cash_entitlement_id else None
+
+    def get_program_id(self, event):
+        instruction = event.instruction
+        if instruction.cash_entitlement_id:
+            return str(instruction.cash_entitlement.program_id)
+        return str(instruction.enrollment.program_id) if instruction.enrollment_id else None
 
     def get_household_reference(self, event):
         return household_reference(self.get_household(event))
@@ -240,6 +255,7 @@ class PaymentBatchSerializer(serializers.ModelSerializer):
         read_only_fields = ["tenant", "created_by", "created_at", "idempotency_key"]
 
 
+# Returns finance reconciliation issues and their review status.
 class ReconciliationItemSerializer(serializers.ModelSerializer):
     program_name = serializers.CharField(source="program.name", read_only=True)
     instruction_reference = serializers.CharField(source="instruction.provider_reference", read_only=True)

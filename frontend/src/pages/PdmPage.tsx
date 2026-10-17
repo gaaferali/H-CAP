@@ -1,10 +1,10 @@
-import { FormEvent, ReactNode, useEffect, useMemo, useState } from "react";
+import { FormEvent, useEffect, useMemo, useState } from "react";
 import { api, listItems } from "../api/api";
 import type { PlatformUser } from "../api/api";
-import type { Entity, Role } from "../types/types";
-import { Badge, Field, FunctionHelp, Message, Panel, SelectField, Table, Textarea } from "../components";
-import { TranslateTree, useTranslation } from "../i18n";
-import { beneficiaryLabel, distributionEventLabel, enrollmentLabel, householdLabel, nfiBeneficiaryLabel, nfiEntitlementLabel, programLabel, readableCode, valueOf } from "../utils";
+import type { Entity } from "../types/types";
+import { Badge, Field, Message, Panel, SelectField, Table } from "../components";
+import { programLabel, valueOf } from "../utils";
+// Shows post-distribution feedback and readable payment impact summaries.
 export function PdmPage({ user }: { user: PlatformUser }) {
   const [tenants, setTenants] = useState<Entity[]>([]);
   const [programs, setPrograms] = useState<Entity[]>([]);
@@ -21,6 +21,7 @@ export function PdmPage({ user }: { user: PlatformUser }) {
     if (programId) query.set("program", programId);
     return query;
   };
+  // Gets programs, feedback records, and the summary for the selected scope.
   const load = async () => {
     try {
       const query = queryForSelection();

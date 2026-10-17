@@ -29,12 +29,14 @@ def api_exception_handler(exc, context):
         message = str(details[0])
     else:
         message = "Your request could not be completed. Please try again."
+    request = context.get("request")
+    correlation_id = getattr(request, "correlation_id", None) or str(uuid.uuid4())
     response.data = {
         "error": {
             "code": exc.__class__.__name__,
             "message": message,
             "fields": json_safe(details) if isinstance(details, dict) else {},
-            "correlation_id": str(uuid.uuid4()),
+            "correlation_id": correlation_id,
         }
     }
     return response

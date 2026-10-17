@@ -1,4 +1,4 @@
-import type { InputHTMLAttributes, ReactNode, TextareaHTMLAttributes } from "react";
+import type { ReactNode } from "react";
 import type { Option } from "../types/types";
 import { TranslateTree, useTranslation } from "../i18n";
 export function Badge({ value }: { value: string }) {
@@ -15,6 +15,7 @@ export function Badge({ value }: { value: string }) {
   return <span className={`badge text-bg-${tone}`}>{translate(value)}</span>;
 }
 
+// Gives forms and record lists the same titled panel style across the platform.
 export function Panel({
   title,
   children,
@@ -46,6 +47,7 @@ export function FunctionHelp({ children }: { children: ReactNode }) {
   );
 }
 
+// Shows API records as a desktop table and readable cards on small screens.
 export function Table({
   headings,
   rows,
@@ -56,9 +58,12 @@ export function Table({
   loading?: boolean;
 }) {
   const translate = useTranslation();
+  const tableClassName = headings.length > 7
+    ? "table table-dense align-middle"
+    : "table align-middle";
   return (
     <div className="table-responsive">
-      <table className="table align-middle">
+      <table className={tableClassName}>
         <thead>
           <tr>
             {headings.map((heading) => (
@@ -71,13 +76,13 @@ export function Table({
         <tbody>
           {loading ? (
             <tr>
-              <td colSpan={headings.length}>{translate("Loading")}</td>
+              <td className="table-empty" colSpan={headings.length}>{translate("Loading")}</td>
             </tr>
           ) : rows.length ? (
             rows.map((row, rowIndex) => (
               <tr key={rowIndex}>
                 {row.map((cell, cellIndex) => (
-                  <td key={cellIndex}>
+                  <td data-label={translate(headings[cellIndex] ?? "")} key={cellIndex}>
                     {typeof cell === "string" ? translate(cell) : cell}
                   </td>
                 ))}
@@ -85,7 +90,7 @@ export function Table({
             ))
           ) : (
             <tr>
-              <td colSpan={headings.length}>
+              <td className="table-empty" colSpan={headings.length}>
                 {translate("No records found.")}
               </td>
             </tr>
@@ -96,6 +101,7 @@ export function Table({
   );
 }
 
+// Shows a short success, saving, or backend error message after an action.
 export function Message({ status, error }: { status: string; error: string }) {
   const translate = useTranslation();
   if (!status && !error) return null;

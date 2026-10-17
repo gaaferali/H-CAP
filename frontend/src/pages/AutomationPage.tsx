@@ -73,6 +73,7 @@ export function AutomationPage({ role }: { role: Role }) {
   );
   const canExecuteRules = ["ADMIN", "MANAGER"].includes(role);
   const canInspectPipeline = ["ADMIN", "MANAGER", "AUDITOR"].includes(role);
+  const aiAvailable = data?.status === "active";
 
   const load = async () => {
     try {
@@ -296,7 +297,7 @@ export function AutomationPage({ role }: { role: Role }) {
       : []);
   return (
     <div className="row g-3">
-      {canExecuteRules && (
+      {canExecuteRules && aiAvailable && (
         <div className="col-12">
           <Panel title="Configure automation rule">
             <p className="form-text">
@@ -409,7 +410,7 @@ export function AutomationPage({ role }: { role: Role }) {
           />
         </Panel>
       </div>
-      {canInspectPipeline && (
+      {canInspectPipeline && aiAvailable && (
         <div className="col-12">
           <Panel title="Data pipeline status">
             <Table
@@ -449,7 +450,7 @@ export function AutomationPage({ role }: { role: Role }) {
           </Panel>
         </div>
       )}
-      {canDeduplicate && (
+      {canDeduplicate && aiAvailable && (
         <div className="col-lg-6">
           <Panel title="Duplicate review">
             <FunctionHelp>
@@ -490,7 +491,7 @@ export function AutomationPage({ role }: { role: Role }) {
           </Panel>
         </div>
       )}
-      {canReconcile && (
+      {canReconcile && aiAvailable && (
         <>
           <div className="col-lg-6">
             <Panel title="Advisory risk review">
@@ -583,7 +584,7 @@ export function AutomationPage({ role }: { role: Role }) {
           </div>
         </>
       )}
-      {canUseCopilot && (
+      {canUseCopilot && aiAvailable && (
         <div className="col-lg-6">
           <Panel title="AI reporting copilot">
             <FunctionHelp>
@@ -619,7 +620,7 @@ export function AutomationPage({ role }: { role: Role }) {
           </Panel>
         </div>
       )}
-      {canExecuteRules && (
+      {canExecuteRules && aiAvailable && (
         <div className="col-lg-6">
           <Panel title="Execute controlled automation rule">
             <FunctionHelp>

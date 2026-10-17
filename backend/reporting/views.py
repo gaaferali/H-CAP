@@ -2,6 +2,7 @@ import csv
 import io
 import json
 import uuid
+import zipfile
 from decimal import Decimal, ROUND_HALF_UP
 from hashlib import sha256
 
@@ -36,15 +37,17 @@ from payments.models import PaymentBatch, PaymentChannelConfig, PaymentEvent, Pa
 from payments.serializers import PaymentBatchSerializer, PaymentChannelConfigSerializer, PaymentEventSerializer, PaymentInstructionSerializer, ReconciliationItemSerializer
 from programs.models import ActivityDependency, Budget, Program, ProgramActivity
 from programs.serializers import ActivityDependencySerializer, BudgetSerializer, ProgramActivitySerializer, ProgramSerializer
-from programs.services import payment_budget_totals, scoped_program
+from programs.services import payment_budget_totals, require_program_active, scoped_program
 from reporting.audit import audit, json_safe
 from reporting.import_utils import normalize_import_header, normalize_import_rows
 from reporting.models import AuditEvent, PDMResponse
 from reporting.serializers import AuditEventSerializer
 from automation.ai_source import AI_AUTOMATION_ENABLED, run_deduplication_check
+from medical.models import MedicalAlert, MedicalBatch, MedicalDistributionIssue, MedicalEntitlement, MedicalEquipment, MedicalProduct
 
 
 
+# Returns tenant-scoped audit history without allowing edits or deletion.
 class AuditEventViewSet(viewsets.ReadOnlyModelViewSet):
     serializer_class = AuditEventSerializer
 
@@ -56,6 +59,7 @@ class AuditEventViewSet(viewsets.ReadOnlyModelViewSet):
         return AuditEvent.objects.filter(tenant=self.request.user.tenant)
 
 
+# Builds the role-based dashboard totals returned to the frontend.
 @api_view(["GET"])
 def reports_view(request):
     requested_tenant = request.query_params.get("tenant")
@@ -86,7 +90,10 @@ def reports_view(request):
     budgets = Budget.objects.filter(program__in=programs)
     distributed = payments.filter(status=PaymentInstruction.Status.SUCCESS).aggregate(total=Sum("amount"))["total"] or 0
     approved = enrollments.filter(status=Enrollment.Status.APPROVED).count()
-    approved_amount = sum(((program.transfer_amount or Decimal("0")) * program.enrollments.filter(status=Enrollment.Status.APPROVED).count() for program in programs), Decimal("0"))
+    approved_amount = CashEntitlement.objects.filter(
+        program__in=programs,
+        status__in=[CashEntitlement.Status.ACTIVE, CashEntitlement.Status.PAID],
+    ).aggregate(total=Sum("amount"))["total"] or Decimal("0")
     budget_totals = budgets.aggregate(planned=Sum("planned_total"), actual=Sum("actual_total"))
     dashboards = {
         "beneficiaries": beneficiaries.count(),
@@ -105,13 +112,19 @@ def reports_view(request):
         "assigned_complaints": list(complaints.filter(assigned_to=request.user).values("id", "category", "severity", "status", "resolution_notes", "beneficiary__full_name", "beneficiary__household__program__name").order_by("status", "-created_at")),
         "operational_exceptions": payments.filter(Q(status=PaymentInstruction.Status.FAILED) | Q(complaints__isnull=False)).distinct().count(),
         "eligible_households": household_eligibility.filter(status=HouseholdEligibility.Status.ELIGIBLE).values("household_id").distinct().count(),
-        "enrolled_households": household_enrollment.filter(status=HouseholdEnrollment.Status.ACCEPTED).values("household_id").distinct().count(),
+        "enrolled_households": household_enrollment.filter(status__in=[HouseholdEnrollment.Status.ACCEPTED, HouseholdEnrollment.Status.APPROVED]).values("household_id").distinct().count(),
         "payment_beneficiaries": enrollments.filter(status=Enrollment.Status.APPROVED, assistance_modality__in=[Enrollment.AssistanceModality.CASH, Enrollment.AssistanceModality.CASH_NFI]).values("beneficiary_id").distinct().count(),
         "nfi_beneficiaries": enrollments.filter(status=Enrollment.Status.APPROVED, assistance_modality__in=[Enrollment.AssistanceModality.NFI, Enrollment.AssistanceModality.CASH_NFI]).values("beneficiary_id").distinct().count(),
         "nfi_entitlement_quantity": nfi_entitlements.aggregate(total=Sum("quantity"))["total"] or 0,
         "nfi_distributed_quantity": nfi_issues.aggregate(total=Sum("actual_quantity"))["total"] or 0,
         "nfi_pending_delivery": nfi_entitlements.filter(issues__isnull=True).count(),
         "available_nfi_stock": NFIItem.objects.filter(program__in=programs).aggregate(total=Sum("available_quantity"))["total"] or 0,
+        "medical_products": MedicalProduct.objects.filter(program__in=programs, active=True).count(),
+        "medical_available_stock": MedicalBatch.objects.filter(program__in=programs, status=MedicalBatch.Status.AVAILABLE).aggregate(total=Sum("available_quantity"))["total"] or 0,
+        "medical_pending_entitlements": MedicalEntitlement.objects.filter(program__in=programs, status=MedicalEntitlement.Status.PENDING).count(),
+        "medical_distributed_quantity": MedicalDistributionIssue.objects.filter(allocation__entitlement__program__in=programs).aggregate(total=Sum("actual_quantity"))["total"] or 0,
+        "medical_open_alerts": MedicalAlert.objects.filter(program__in=programs, status=MedicalAlert.Status.OPEN).count(),
+        "medical_equipment": MedicalEquipment.objects.filter(program__in=programs, active=True).count(),
         "program_kpis": list(programs.values("id", "name", "country", "currency", "status", "tenant__name").annotate(enrollments=Count("enrollments"))),
     }
     role_dashboard_fields = {
@@ -122,6 +135,8 @@ def reports_view(request):
             "beneficiaries", "approvals", "paid", "pending", "failed", "amounts_approved",
             "amounts_distributed", "budget_planned", "budget_actual", "budget_remaining",
             "reconciliation", "operational_exceptions", "program_kpis",
+            "medical_products", "medical_available_stock", "medical_pending_entitlements",
+            "medical_distributed_quantity", "medical_open_alerts", "medical_equipment",
         },
     }
     if request.user.is_superuser or request.user.role in {User.Role.ADMIN, User.Role.MANAGER, User.Role.AUDITOR}:
@@ -143,9 +158,11 @@ def reports_view(request):
     })
 
 
+# Returns operational and financial totals for one active program.
 @api_view(["GET"])
 def program_summary_view(request, program_id):
     program = scoped_program(request, program_id)
+    require_program_active(program, "record import")
     payments = PaymentInstruction.objects.filter(
         Q(cash_entitlement__program=program) | Q(enrollment__program=program)
     )
@@ -200,8 +217,18 @@ def imports_view(request):
     content = upload.read()
     content_hash = sha256(content).hexdigest()
     if upload.name.lower().endswith(".csv"):
+        if b"\x00" in content:
+            raise ValidationError({"file": "The CSV file contains invalid binary content."})
         rows = list(csv.DictReader(io.StringIO(content.decode("utf-8-sig"))))
     elif upload.name.lower().endswith(".xlsx"):
+        if not content.startswith(b"PK"):
+            raise ValidationError({"file": "The XLSX file signature is invalid."})
+        try:
+            with zipfile.ZipFile(io.BytesIO(content)) as archive:
+                if sum(entry.file_size for entry in archive.infolist()) > 50 * 1024 * 1024:
+                    raise ValidationError({"file": "The expanded spreadsheet is too large."})
+        except zipfile.BadZipFile as exc:
+            raise ValidationError({"file": "The XLSX file is damaged or invalid."}) from exc
         workbook = load_workbook(io.BytesIO(content), read_only=True, data_only=True)
         sheet = workbook.active
         values = list(sheet.values)
@@ -209,6 +236,8 @@ def imports_view(request):
         rows = [dict(zip(headers, row)) for row in values[1:] if any(value is not None and str(value).strip() for value in row)]
     else:
         raise ValidationError({"file": "Use a .csv or .xlsx file"})
+    if len(rows) > 5000:
+        raise ValidationError({"file": "Import files are limited to 5,000 data rows."})
     rows = normalize_import_rows(rows)
     available_columns = set(rows[0].keys()) if rows else set()
     required_columns = {"client_generated_id", "household_size", "location", "full_name"}
@@ -299,6 +328,7 @@ def imports_view(request):
     }, status=status.HTTP_201_CREATED)
 
 
+# Calculates PDM coverage, complaints, payment amounts, and satisfaction totals.
 def pdm_program_metrics(program, responses=None):
     successful_payments = PaymentInstruction.objects.filter(
         Q(cash_entitlement__program=program) | Q(enrollment__program=program),
@@ -323,6 +353,7 @@ def pdm_program_metrics(program, responses=None):
     }
 
 
+# Lists PDM responses or creates recipient feedback from verified payment data.
 @api_view(["GET", "POST"])
 def pdm_view(request):
     permitted_roles = {User.Role.ADMIN, User.Role.SUPPORT, User.Role.FIELD_OFFICER, User.Role.MANAGER, User.Role.AUDITOR}
@@ -375,6 +406,7 @@ def pdm_view(request):
     return Response({"status": "created", "id": str(response.id), "submitted_at": response.created_at}, status=status.HTTP_201_CREATED)
 
 
+# Returns readable PDM summary data for the selected tenant and program.
 @api_view(["GET"])
 def pdm_summary_view(request):
     if request.user.role not in {User.Role.ADMIN, User.Role.SUPPORT, User.Role.FIELD_OFFICER, User.Role.MANAGER, User.Role.AUDITOR}:
@@ -422,7 +454,7 @@ def pdm_summary_view(request):
     channels = list(responses.exclude(channel="").values_list("channel", flat=True).distinct().order_by("channel"))
     locations = list(responses.exclude(location="").values_list("location", flat=True).distinct().order_by("location"))
     eligible_households = HouseholdEligibility.objects.filter(program__in=summary_programs, status=HouseholdEligibility.Status.ELIGIBLE).values("household_id").distinct().count()
-    enrolled_households = HouseholdEnrollment.objects.filter(program__in=summary_programs, status=HouseholdEnrollment.Status.ACCEPTED).values("household_id").distinct().count()
+    enrolled_households = HouseholdEnrollment.objects.filter(program__in=summary_programs, status__in=[HouseholdEnrollment.Status.ACCEPTED, HouseholdEnrollment.Status.APPROVED]).values("household_id").distinct().count()
     approved = Enrollment.objects.filter(program__in=summary_programs, status=Enrollment.Status.APPROVED)
     cash_beneficiaries = approved.filter(assistance_modality__in=[Enrollment.AssistanceModality.CASH, Enrollment.AssistanceModality.CASH_NFI]).values("beneficiary_id").distinct().count()
     nfi_beneficiaries = approved.filter(assistance_modality__in=[Enrollment.AssistanceModality.NFI, Enrollment.AssistanceModality.CASH_NFI]).values("beneficiary_id").distinct().count()

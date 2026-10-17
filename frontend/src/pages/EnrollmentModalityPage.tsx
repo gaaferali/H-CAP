@@ -1,10 +1,9 @@
-import { FormEvent, ReactNode, useEffect, useMemo, useState } from "react";
+import { FormEvent, useEffect, useState } from "react";
 import { api, listItems } from "../api/api";
-import type { PlatformUser } from "../api/api";
 import type { Entity, Role } from "../types/types";
-import { Badge, Field, FunctionHelp, Message, Panel, SelectField, Table, Textarea } from "../components";
-import { TranslateTree, useTranslation } from "../i18n";
-import { beneficiaryLabel, distributionEventLabel, enrollmentLabel, householdLabel, nfiBeneficiaryLabel, nfiEntitlementLabel, programLabel, readableCode, valueOf } from "../utils";
+import { Badge, Message, Panel, SelectField, Table, Textarea } from "../components";
+import { programLabel, valueOf } from "../utils";
+// Shows approved household enrollment and assistance modality decisions.
 export function EnrollmentModalityPage({ role }: { role: Role }) {
   const [enrollments, setEnrollments] = useState<Entity[]>([]);
   const [programs, setPrograms] = useState<Entity[]>([]);
@@ -14,6 +13,7 @@ export function EnrollmentModalityPage({ role }: { role: Role }) {
   const [status, setStatus] = useState("");
   const [error, setError] = useState("");
   const canDecide = role !== "FINANCE";
+  // Gets saved enrollments and the eligible households available for a new decision.
   const load = async () => {
     try {
       const enrollmentResponse = await api.list<Entity>("household-enrollments");
@@ -44,12 +44,21 @@ export function EnrollmentModalityPage({ role }: { role: Role }) {
     setStatus("saving");
     setError("");
     try {
-      await api.create("household-enrollments", {
-        household: form.get("household"),
+      const household = String(form.get("household"));
+      const modalityDecisions = ["CASH", "NFI", "MEDICAL"].filter((modality) => form.get(`${modality.toLowerCase()}_status`)).map((modality) => ({
+        modality,
+        status: form.get(`${modality.toLowerCase()}_status`),
+        note: form.get("note") || "",
+      }));
+      const payload = {
+        household,
         program: selectedProgramId,
-        status: form.get("status"),
-        assistance_modality: form.get("assistance_modality"),
-      });
+        modality_decisions: modalityDecisions,
+        note: form.get("note") || "",
+      };
+      const existing = enrollments.find((row) => valueOf(row, "household") === household && valueOf(row, "program") === selectedProgramId);
+      if (existing) await api.update("household-enrollments", existing.id, payload);
+      else await api.create("household-enrollments", payload);
       formElement.reset();
       setSelectedHouseholdId("");
       await load();
@@ -69,14 +78,11 @@ export function EnrollmentModalityPage({ role }: { role: Role }) {
       valueOf(row, "program") === selectedProgramId &&
       valueOf(row, "status") === "ELIGIBLE",
   );
-  const options =
-    program?.cash_enabled && program?.nfi_enabled
-      ? ["CASH", "NFI", "CASH_NFI"]
-      : program?.cash_enabled
-        ? ["CASH"]
-        : program?.nfi_enabled
-          ? ["NFI"]
-          : [];
+  const enabledModalities = [
+    program?.cash_enabled ? ["cash", "Payment / Cash"] : null,
+    program?.nfi_enabled ? ["nfi", "NFI / In-Kind"] : null,
+    program?.medical_enabled ? ["medical", "Medical Assistance"] : null,
+  ].filter(Boolean) as string[][];
   return (
     <div className="row g-3">
       {canDecide && <div className="col-lg-5">
@@ -108,33 +114,10 @@ export function EnrollmentModalityPage({ role }: { role: Role }) {
               disabled={!selectedProgramId}
               required
             />
-            <SelectField
-              label="Decision"
-              name="status"
-              options={["PENDING", "APPROVED", "REJECTED", "SUSPENDED"].map((value) => ({
-                value,
-                label: value,
-              }))}
-              required
-            />
-            <SelectField
-              label="Assistance modality"
-              name="assistance_modality"
-              options={options.map((value) => ({
-                value,
-                label:
-                  value === "CASH"
-                    ? "Payment"
-                    : value === "NFI"
-                      ? "NFI"
-                      : "Payment + NFI",
-              }))}
-              required
-              disabled={!options.length}
-            />
+            {enabledModalities.map(([key, label]) => <SelectField key={key} label={`${label} decision`} name={`${key}_status`} options={["PENDING", "APPROVED", "REJECTED", "SUSPENDED"].map((value) => ({ value, label: value }))} required />)}
+            <Textarea label="Decision note" name="note" />
             <p className="form-text">
-              Only modalities enabled for the selected program are available.
-              A household must first have an eligible household review.
+              Each enabled modality receives its own decision. A household must first have an eligible household review.
             </p>
             <button className="btn btn-primary">
               Save enrollment decision
@@ -159,7 +142,9 @@ export function EnrollmentModalityPage({ role }: { role: Role }) {
               valueOf(item, "household_reference") || "Household",
               valueOf(item, "program_name"),
               valueOf(item, "member_count") || 0,
-              valueOf(item, "assistance_modality") || "CASH",
+              Array.isArray(item.modality_decision_details) && item.modality_decision_details.length
+                ? (item.modality_decision_details as Entity[]).map((decision) => `${valueOf(decision, "modality")}: ${valueOf(decision, "status")}`).join(" · ")
+                : valueOf(item, "assistance_modality") || "CASH",
               <Badge value={valueOf(item, "status") || "PENDING"} />,
               ])}
           />
