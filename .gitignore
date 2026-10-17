@@ -1,4 +1,5 @@
 .venv/
+.locust-venv/
 backend/**/__pycache__/
 backend/**/*.pyc
 frontend/node_modules/
@@ -25,4 +26,3 @@ locust-results/
 **/locustfile.py
 locust_*.csv
 locust_*.html
-
