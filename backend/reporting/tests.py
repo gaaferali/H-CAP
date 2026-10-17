@@ -1,4 +1,5 @@
 from django.test import TestCase
+from django.conf import settings
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.core.serializers.json import DjangoJSONEncoder
 from rest_framework.test import APIClient
@@ -28,7 +29,7 @@ class TenantBoundaryTests(TestCase):
         self.client.force_authenticate(self.manager)
 
     def test_manager_creates_user_only_in_own_tenant(self):
-        response = self.client.post("/api/users/", {"email": "field@example.test", "full_name": "Field Officer", "password": "password", "role": User.Role.FIELD_OFFICER, "tenant_id": str(self.other_tenant.id)}, format="json")
+        response = self.client.post("/api/users/", {"email": "field@example.test", "full_name": "Field Officer", "password": "FieldOfficer!2026", "role": User.Role.FIELD_OFFICER, "tenant_id": str(self.other_tenant.id)}, format="json")
         self.assertEqual(response.status_code, 201)
         self.assertEqual(User.objects.get(email="field@example.test").tenant, self.tenant)
 
@@ -41,7 +42,7 @@ class TenantBoundaryTests(TestCase):
         self.client.force_authenticate(tenant_admin)
         response = self.client.post(
             "/api/users/",
-            {"email": "support@example.test", "full_name": "Support Officer", "password": "password", "role": User.Role.SUPPORT},
+            {"email": "support@example.test", "full_name": "Support Officer", "password": "SupportOfficer!2026", "role": User.Role.SUPPORT},
             format="json",
         )
         self.assertEqual(response.status_code, 201)
@@ -77,7 +78,7 @@ class ActivityDependencyTests(TestCase):
     def setUp(self):
         self.tenant = Tenant.objects.create(name="Tenant A", tenant_type="NGO", default_currency="USD")
         self.manager = User.objects.create_user("manager@example.test", "Tenant Manager", self.tenant, "password", role=User.Role.MANAGER)
-        self.program = Program.objects.create(tenant=self.tenant, name="Cash support", country="Sudan", country_code="SD", currency="USD", reporting_currency="USD", transfer_amount="50.00", payment_cycle=Program.Cycle.MONTHLY, created_by=self.manager)
+        self.program = Program.objects.create(tenant=self.tenant, name="Cash support", country="Sudan", country_code="SD", currency="USD", reporting_currency="USD", transfer_amount="50.00", payment_cycle=Program.Cycle.MONTHLY, status=Program.Status.ACTIVE, created_by=self.manager)
         self.first = ProgramActivity.objects.create(tenant=self.tenant, program=self.program, name="Register", created_by=self.manager)
         self.second = ProgramActivity.objects.create(tenant=self.tenant, program=self.program, name="Review", created_by=self.manager)
         self.client = APIClient()
@@ -161,7 +162,7 @@ class RegistrationTests(TestCase):
         self.tenant_admin = User.objects.create_user("admin@example.test", "Tenant Admin", self.tenant, "password", role=User.Role.ADMIN)
         self.support = User.objects.create_user("support@example.test", "Support Officer", self.tenant, "password", role=User.Role.SUPPORT)
         self.manager = User.objects.create_user("manager@example.test", "Tenant Manager", self.tenant, "password", role=User.Role.MANAGER)
-        self.program = Program.objects.create(tenant=self.tenant, name="Cash support", country="Sudan", country_code="SD", currency="USD", reporting_currency="USD", transfer_amount="50.00", payment_cycle=Program.Cycle.MONTHLY, created_by=self.manager)
+        self.program = Program.objects.create(tenant=self.tenant, name="Cash support", country="Sudan", country_code="SD", currency="USD", reporting_currency="USD", transfer_amount="50.00", payment_cycle=Program.Cycle.MONTHLY, status=Program.Status.ACTIVE, created_by=self.manager)
         self.other_program = Program.objects.create(tenant=self.other_tenant, name="Other support", country="Chad", country_code="TD", currency="USD", reporting_currency="USD", transfer_amount="50.00", payment_cycle=Program.Cycle.MONTHLY, created_by=User.objects.create_user("other-manager@example.test", "Other Manager", self.other_tenant, "password", role=User.Role.MANAGER))
         self.client = APIClient()
 
@@ -368,6 +369,7 @@ class PaymentInstructionWorkflowTests(TestCase):
             currency="USD",
             transfer_amount="50.00",
             payment_cycle=Program.Cycle.ONE_TIME,
+            status=Program.Status.ACTIVE,
             created_by=self.manager,
         )
         self.budget = Budget.objects.create(program=self.program, currency="USD", planned_total="500.00")
@@ -419,6 +421,7 @@ class PaymentInstructionWorkflowTests(TestCase):
             currency="USD",
             transfer_amount="50.00",
             payment_cycle=Program.Cycle.ONE_TIME,
+            status=Program.Status.ACTIVE,
             created_by=self.manager,
         )
         self.other_channel = PaymentChannelConfig.objects.create(
@@ -472,6 +475,7 @@ class PaymentInstructionWorkflowTests(TestCase):
         self.assertEqual(instruction.cash_entitlement, self.entitlement)
         self.assertIsNone(instruction.enrollment)
         self.assertEqual(instruction.beneficiary, self.beneficiary)
+        self.assertEqual(response.data["program_id"], str(self.program.id))
         self.assertEqual(response.data["program_name"], self.program.name)
         self.assertEqual(
             response.data["household_reference"],
@@ -505,6 +509,7 @@ class PaymentInstructionWorkflowTests(TestCase):
         self.assertEqual(Decimal(budget.data["successful_fees"]), Decimal("2.50"))
         self.assertEqual(Decimal(budget.data["used_amount"]), Decimal("52.50"))
         events = self.client.get(f"/api/payment-instructions/{instruction_id}/events/")
+        self.assertEqual(events.data[-1]["program_id"], str(self.program.id))
         self.assertEqual(events.data[-1]["actor_name"], self.finance.full_name)
         self.assertEqual(events.data[-1]["household_reference"], created.data["household_reference"])
 
@@ -848,6 +853,7 @@ class PDMAndAuthenticationTests(TestCase):
             reporting_currency="USD",
             transfer_amount="50.00",
             payment_cycle=Program.Cycle.MONTHLY,
+            status=Program.Status.ACTIVE,
             created_by=self.manager,
         )
         self.client = APIClient()
@@ -913,16 +919,18 @@ class PDMAndAuthenticationTests(TestCase):
             format="json",
         )
         self.assertEqual(login_response.status_code, 200)
+        self.assertNotIn("refresh", login_response.data)
+        self.assertIn(settings.JWT_REFRESH_COOKIE, login_response.cookies)
         self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {login_response.data['access']}")
         logout_response = self.client.post(
             "/api/auth/logout/",
-            {"refresh": login_response.data["refresh"]},
+            {},
             format="json",
         )
         self.assertEqual(logout_response.status_code, 200)
         refresh_response = self.client.post(
             "/api/auth/refresh/",
-            {"refresh": login_response.data["refresh"]},
+            {},
             format="json",
         )
         self.assertEqual(refresh_response.status_code, 401)
@@ -1170,6 +1178,12 @@ class EndToEndWorkflowTests(TestCase):
         )
         self.assertEqual(program_response.status_code, 201)
         program_id = program_response.data["id"]
+        activate_response = self.client.post(
+            f"/api/programs/{program_id}/activate/",
+            {"reason": "Program setup completed for the workflow test"},
+            format="json",
+        )
+        self.assertEqual(activate_response.status_code, 200, activate_response.data)
         budget_response = self.client.post(
             "/api/budgets/",
             {"program": program_id, "currency": "USD", "status": "ACTIVE", "planned_total": "1000.00", "actual_total": "0.00", "line_items": []},
@@ -1351,6 +1365,7 @@ class EndToEndWorkflowTests(TestCase):
             reporting_currency="USD",
             transfer_amount="50.00",
             payment_cycle=Program.Cycle.MONTHLY,
+            status=Program.Status.ACTIVE,
             created_by=self.manager,
         )
         self.authenticate(self.field_officer)
@@ -1457,34 +1472,51 @@ class DeletionAccessTests(TestCase):
         )
         return household, beneficiary, enrollment, instruction
 
-    def test_manager_can_delete_program_and_its_protected_dependencies(self):
+    def test_manager_cannot_delete_program_with_protected_history(self):
         household, beneficiary, enrollment, instruction = self.make_beneficiary_graph(self.program, self.manager)
         Budget.objects.create(program=self.program, currency="USD", planned_total="100.00")
         self.client.force_authenticate(self.manager)
 
         response = self.client.delete(f"/api/programs/{self.program.id}/")
 
-        self.assertEqual(response.status_code, 204)
-        self.assertFalse(Program.objects.filter(id=self.program.id).exists())
-        self.assertFalse(Household.objects.filter(id=household.id).exists())
-        self.assertFalse(Beneficiary.objects.filter(id=beneficiary.id).exists())
-        self.assertFalse(Enrollment.objects.filter(id=enrollment.id).exists())
-        self.assertFalse(PaymentInstruction.objects.filter(id=instruction.id).exists())
-        self.assertTrue(AuditEvent.objects.filter(action="PROGRAM_DELETED", entity_id=str(self.program.id)).exists())
+        self.assertEqual(response.status_code, 400)
+        self.assertTrue(Program.objects.filter(id=self.program.id).exists())
+        self.assertTrue(Household.objects.filter(id=household.id).exists())
+        self.assertTrue(Beneficiary.objects.filter(id=beneficiary.id).exists())
+        self.assertTrue(Enrollment.objects.filter(id=enrollment.id).exists())
+        self.assertTrue(PaymentInstruction.objects.filter(id=instruction.id).exists())
 
-    def test_manager_can_delete_beneficiary_and_payment_dependencies(self):
+    def test_manager_exits_beneficiary_without_deleting_history(self):
         household, beneficiary, enrollment, instruction = self.make_beneficiary_graph(self.program, self.manager)
         self.client.force_authenticate(self.manager)
 
         response = self.client.delete(f"/api/beneficiaries/{beneficiary.id}/")
 
-        self.assertEqual(response.status_code, 204)
-        self.assertFalse(Household.objects.filter(id=household.id).exists())
-        self.assertFalse(Beneficiary.objects.filter(id=beneficiary.id).exists())
-        self.assertFalse(Enrollment.objects.filter(id=enrollment.id).exists())
-        self.assertFalse(PaymentInstruction.objects.filter(id=instruction.id).exists())
-        self.assertTrue(AuditEvent.objects.filter(action="BENEFICIARY_DELETED").exists())
-        self.assertTrue(AuditEvent.objects.filter(action="HOUSEHOLD_DELETED_AFTER_LAST_BENEFICIARY").exists())
+        self.assertEqual(response.status_code, 403)
+        exited = self.client.post(
+            f"/api/beneficiaries/{beneficiary.id}/exit/",
+            {"reason": "Household requested future withdrawal"},
+            format="json",
+        )
+        self.assertEqual(exited.status_code, 200, exited.data)
+        beneficiary.refresh_from_db()
+        enrollment.refresh_from_db()
+        self.assertEqual(beneficiary.status, Beneficiary.Status.EXITED)
+        self.assertEqual(enrollment.status, Enrollment.Status.SUSPENDED)
+        self.assertTrue(Household.objects.filter(id=household.id).exists())
+        self.assertTrue(PaymentInstruction.objects.filter(id=instruction.id).exists())
+        self.assertTrue(AuditEvent.objects.filter(action="BENEFICIARY_EXITED").exists())
+
+    def test_manager_can_delete_only_a_pristine_draft_with_reason(self):
+        pristine = self.make_program(self.tenant, self.manager, "Unused draft")
+        self.client.force_authenticate(self.manager)
+        response = self.client.delete(
+            f"/api/programs/{pristine.id}/",
+            {"reason": "Draft was created in error"},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 204, response.data)
+        self.assertFalse(Program.objects.filter(id=pristine.id).exists())
 
     def test_field_officer_cannot_delete_beneficiary(self):
         _, beneficiary, _, _ = self.make_beneficiary_graph(self.program, self.manager)
@@ -1606,7 +1638,7 @@ class NFIWorkflowTests(TestCase):
         self.finance = User.objects.create_user("nfi-finance@example.test", "NFI Finance", self.tenant, "password", role=User.Role.FINANCE)
         self.reviewer = User.objects.create_user("nfi-reviewer@example.test", "NFI Reviewer", self.tenant, "password", role=User.Role.REVIEWER)
         self.field_officer = User.objects.create_user("nfi-field@example.test", "NFI Field Officer", self.tenant, "password", role=User.Role.FIELD_OFFICER)
-        self.program = Program.objects.create(name="NFI response", tenant=self.tenant, country="Sudan", currency="USD", transfer_amount="1.00", payment_cycle=Program.Cycle.ONE_TIME, cash_enabled=False, nfi_enabled=True, created_by=self.manager)
+        self.program = Program.objects.create(name="NFI response", tenant=self.tenant, country="Sudan", currency="USD", transfer_amount="1.00", payment_cycle=Program.Cycle.ONE_TIME, cash_enabled=False, nfi_enabled=True, status=Program.Status.ACTIVE, created_by=self.manager)
         self.household = Household.objects.create(tenant=self.tenant, program=self.program, household_size=3, location="Khartoum", registration_date=date.today(), created_by=self.manager)
         self.beneficiary = Beneficiary.objects.create(household=self.household, number="NFI-001", full_name="NFI Beneficiary", created_by=self.manager)
         self.enrollment = Enrollment.objects.create(beneficiary=self.beneficiary, program=self.program, eligibility_status=Enrollment.EligibilityStatus.ELIGIBLE, status=Enrollment.Status.APPROVED, assistance_modality=Enrollment.AssistanceModality.NFI, approved_by=self.reviewer)
@@ -1796,6 +1828,7 @@ class NFIWorkflowTests(TestCase):
             payment_cycle=Program.Cycle.ONE_TIME,
             cash_enabled=False,
             nfi_enabled=True,
+            status=Program.Status.ACTIVE,
             created_by=self.manager,
         )
         self.client.force_authenticate(self.finance)
@@ -1840,6 +1873,7 @@ class NFIWorkflowTests(TestCase):
         allocation_response = self.client.get("/api/distribution-allocations/")
         self.assertEqual(allocation_response.status_code, 200, allocation_response.data)
         allocation_data = allocation_response.data["results"][0]
+        self.assertEqual(str(allocation_data["program_id"]), str(self.program.id))
         self.assertEqual(allocation_data["beneficiary_name"], self.beneficiary.full_name)
         self.assertEqual(allocation_data["national_id_reference"], "•••• " + self.beneficiary.number[-4:])
         self.assertEqual(allocation_data["item_name"], self.item.name)
@@ -1849,6 +1883,7 @@ class NFIWorkflowTests(TestCase):
         self.client.force_authenticate(self.reviewer)
         issue_response = self.client.post("/api/distribution-issues/", {"beneficiary": str(self.beneficiary.id), "entitlement": str(entitlement.id), "item": str(self.item.id), "event": event_response.data["id"], "planned_quantity": 3, "actual_quantity": 3, "delivery_status": "RECEIVED"}, format="json")
         self.assertEqual(issue_response.status_code, 201, issue_response.data)
+        self.assertEqual(str(issue_response.data["program_id"]), str(self.program.id))
         self.assertEqual(issue_response.data["beneficiary_name"], self.beneficiary.full_name)
         self.assertEqual(issue_response.data["national_id_reference"], "•••• " + self.beneficiary.number[-4:])
         self.assertEqual(issue_response.data["item_name"], self.item.name)

@@ -1,6 +1,8 @@
 from decimal import Decimal
 
 from django.contrib.auth import authenticate
+from django.contrib.auth.password_validation import validate_password
+from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db.models import Q, Sum
 from django.utils import timezone
 from rest_framework import serializers
@@ -37,16 +39,18 @@ from reporting.models import AuditEvent
 
 
 
+# Returns tenant details used by platform administration pages.
 class TenantSerializer(serializers.ModelSerializer):
     class Meta:
         model = Tenant
         fields = "__all__"
 
 
+# Validates user details and returns safe profile data without passwords.
 class UserSerializer(serializers.ModelSerializer):
     tenant = TenantSerializer(read_only=True)
     tenant_id = serializers.PrimaryKeyRelatedField(source="tenant", queryset=Tenant.objects.all(), write_only=True, required=False)
-    password = serializers.CharField(write_only=True, required=False)
+    password = serializers.CharField(write_only=True, required=True)
 
     class Meta:
         model = User
@@ -54,8 +58,12 @@ class UserSerializer(serializers.ModelSerializer):
         read_only_fields = ["id", "tenant", "created_at"]
 
     def create(self, validated_data):
-        password = validated_data.pop("password", None) or "ChangeMe123!"
+        password = validated_data.pop("password")
         user = User(**validated_data)
+        try:
+            validate_password(password, user=user)
+        except DjangoValidationError as exc:
+            raise serializers.ValidationError({"password": list(exc.messages)}) from exc
         user.set_password(password)
         user.save()
         return user
@@ -65,11 +73,16 @@ class UserSerializer(serializers.ModelSerializer):
         for key, value in validated_data.items():
             setattr(instance, key, value)
         if password:
+            try:
+                validate_password(password, user=instance)
+            except DjangoValidationError as exc:
+                raise serializers.ValidationError({"password": list(exc.messages)}) from exc
             instance.set_password(password)
         instance.save()
         return instance
 
 
+# Checks the email and password before the login view creates JWT tokens.
 class LoginSerializer(serializers.Serializer):
     email = serializers.EmailField()
     password = serializers.CharField(write_only=True)

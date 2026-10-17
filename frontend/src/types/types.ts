@@ -1,5 +1,5 @@
 export type Role = "ADMIN" | "FIELD_OFFICER" | "FINANCE" | "REVIEWER" | "SUPPORT" | "MANAGER" | "AUDITOR";
-export type Route = "dashboard" | "tenants" | "programs" | "households" | "beneficiaries" | "eligibility" | "enrollment" | "payments" | "pdm" | "complaints" | "activities" | "audit" | "imports" | "automation" | "assistance" | "nfi_entitlements" | "distribution_events" | "delivery_review" | "users" | "profile";
+export type Route = "dashboard" | "tenants" | "programs" | "households" | "beneficiaries" | "eligibility" | "enrollment" | "payments" | "pdm" | "complaints" | "activities" | "audit" | "imports" | "automation" | "assistance" | "nfi_entitlements" | "distribution_events" | "delivery_review" | "medical" | "medical_inventory" | "medical_entitlements" | "medical_distribution" | "medical_equipment" | "users" | "profile";
 export type Locale = "en" | "ar";
 export type Entity = {
   id: string;
@@ -27,4 +27,4 @@ export type PlatformUser = {
   tenant?: { id: string; name: string };
 };
 export type ApiError = { error?: { message?: string }; detail?: string };
-export type ApiList<T> = T[] | { results: T[] };
+export type ApiList<T> = T[] | { count?: number; next?: string | null; previous?: string | null; results: T[] };

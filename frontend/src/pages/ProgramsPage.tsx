@@ -1,15 +1,15 @@
-import { FormEvent, ReactNode, useEffect, useMemo, useState } from "react";
+import { FormEvent, useEffect, useState } from "react";
 import { api, listItems } from "../api/api";
-import type { PlatformUser } from "../api/api";
 import type { Entity, Role } from "../types/types";
-import { Badge, Field, FunctionHelp, Message, Panel, SelectField, Table, Textarea } from "../components";
-import { TranslateTree, useTranslation } from "../i18n";
-import { beneficiaryLabel, distributionEventLabel, enrollmentLabel, householdLabel, nfiBeneficiaryLabel, nfiEntitlementLabel, programLabel, readableCode, valueOf } from "../utils";
+import { Badge, Field, Message, Panel, SelectField, Table } from "../components";
+import { programLabel, valueOf } from "../utils";
+// Shows program setup and the program records available to the signed-in role.
 export function ProgramsPage({ role }: { role: Role }) {
   const [programs, setPrograms] = useState<Entity[]>([]);
   const [selected, setSelected] = useState("");
   const [status, setStatus] = useState("");
   const [error, setError] = useState("");
+  // Gets the latest programs and returns them to the setup and finance views.
   const load = async () => {
     try {
       setPrograms(listItems(await api.list<Entity>("programs")));
@@ -342,8 +342,25 @@ function ProgramSetup({
   const [status, setStatus] = useState("");
   const [error, setError] = useState("");
   const program = programs.find((row) => row.id === selected);
+  const lifecycleAction = async (action: "activate" | "pause" | "close" | "reopen" | "delete") => {
+    if (!program) return;
+    const reason = window.prompt("Enter the audit reason for this program change:", "Operational program management");
+    if (!reason) return;
+    setStatus("saving");
+    setError("");
+    try {
+      if (action === "delete") await api.removeWithReason("programs", program.id, reason);
+      else await api.action(`/programs/${program.id}/${action}/`, { reason });
+      if (action === "delete") setSelected("");
+      await reload();
+      setStatus("saved");
+    } catch (reasonValue) {
+      setStatus("failed");
+      setError(reasonValue instanceof Error ? reasonValue.message : "Could not change the program lifecycle.");
+    }
+  };
   const loadSetup = async () => {
-    if (!selected || !program?.nfi_enabled) {
+    if (!selected || !(program?.nfi_enabled || program?.medical_enabled)) {
       setWarehouses([]);
       setItems([]);
       return;
@@ -371,7 +388,7 @@ function ProgramSetup({
   };
   useEffect(() => {
     void loadSetup();
-  }, [selected, program?.nfi_enabled]);
+  }, [selected, program?.nfi_enabled, program?.medical_enabled]);
   const create = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
 
@@ -383,6 +400,7 @@ function ProgramSetup({
     // These names match the checkbox names in your JSX.
     const paymentEnabled = form.has("cash_enabled");
     const nfiEnabled = form.has("nfi_enabled");
+    const medicalEnabled = form.has("medical_enabled");
     const otherAssistanceEnabled = form.has("other_assistance_enabled");
 
     setStatus("saving");
@@ -423,6 +441,7 @@ function ProgramSetup({
         status: "DRAFT",
         cash_enabled: paymentEnabled,
         nfi_enabled: nfiEnabled,
+        medical_enabled: medicalEnabled,
         other_assistance_enabled: otherAssistanceEnabled,
 
         workflow_config: {
@@ -483,6 +502,30 @@ function ProgramSetup({
           ? reason.message
           : "Could not save the warehouse.",
       );
+    }
+  };
+  const updateProgram = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!program) return;
+    const form = new FormData(event.currentTarget);
+    setStatus("saving");
+    setError("");
+    try {
+      await api.update("programs", program.id, {
+        name: form.get("edit_name"),
+        country: form.get("edit_country"),
+        start_date: form.get("edit_start_date") || null,
+        end_date: form.get("edit_end_date") || null,
+        cash_enabled: form.get("edit_cash_enabled") === "on",
+        nfi_enabled: form.get("edit_nfi_enabled") === "on",
+        medical_enabled: form.get("edit_medical_enabled") === "on",
+        payment_cycle: form.get("edit_cash_enabled") === "on" ? valueOf(program, "payment_cycle") || "ONE_TIME" : "",
+      });
+      await reload();
+      setStatus("saved");
+    } catch (reasonValue) {
+      setStatus("failed");
+      setError(reasonValue instanceof Error ? reasonValue.message : "Could not update the program.");
     }
   };
   const createItem = async (event: FormEvent<HTMLFormElement>) => {
@@ -561,6 +604,7 @@ function ProgramSetup({
               {[
                 ["cash_enabled", "Payment / Cash", true],
                 ["nfi_enabled", "NFI / In-Kind", false],
+                ["medical_enabled", "Medical Assistance", false],
                 [
                   "other_assistance_enabled",
                   "Other Assistance / Third Modality",
@@ -587,7 +631,7 @@ function ProgramSetup({
               ))}
             </fieldset>
             <button className="btn btn-primary">
-              Create program and budget
+              {cashEnabled ? "Create program and budget" : "Create program"}
             </button>
           </form>
           <Message status={status} error={error} />
@@ -606,7 +650,7 @@ function ProgramSetup({
             onChange={setSelected}
           />
           <p className="form-text">
-            Payment and NFI setup appear only when enabled for the selected
+            Payment, NFI, and Medical Assistance setup appears only when enabled for the selected
             program.
           </p>
           {program?.cash_enabled && (
@@ -620,9 +664,28 @@ function ProgramSetup({
               Other Assistance / Third Modality — Coming Soon / Not Implemented.
             </div>
           )}
+          {program?.medical_enabled && (
+            <p className="text-success">
+              Medical Assistance is enabled; use the Medical Assistance pages for products, batches, entitlements, and delivery.
+            </p>
+          )}
+          {program && (
+            <div className="mt-3">
+              <div className="d-flex flex-wrap gap-2 align-items-center">
+                <Badge value={valueOf(program, "status") || "DRAFT"} />
+                {valueOf(program, "status") === "DRAFT" && <button type="button" className="btn btn-sm btn-success" onClick={() => void lifecycleAction("activate")}>Activate</button>}
+                {valueOf(program, "status") === "ACTIVE" && <button type="button" className="btn btn-sm btn-outline-warning" onClick={() => void lifecycleAction("pause")}>Pause</button>}
+                {valueOf(program, "status") === "PAUSED" && <button type="button" className="btn btn-sm btn-success" onClick={() => void lifecycleAction("activate")}>Resume</button>}
+                {["ACTIVE", "PAUSED"].includes(valueOf(program, "status")) && <button type="button" className="btn btn-sm btn-outline-danger" onClick={() => void lifecycleAction("close")}>Close program</button>}
+                {valueOf(program, "status") === "CLOSED" && <button type="button" className="btn btn-sm btn-outline-primary" onClick={() => void lifecycleAction("reopen")}>Reopen as paused</button>}
+                {valueOf(program, "status") === "DRAFT" && <button type="button" className="btn btn-sm btn-outline-danger" onClick={() => void lifecycleAction("delete")}>Delete unused draft</button>}
+              </div>
+              <p className="form-text mb-0">Closing preserves all assistance, payment, inventory, and audit history. Programs with in-flight work cannot be closed.</p>
+            </div>
+          )}
         </Panel>
       </div>
-      {program?.nfi_enabled && (
+      {(program?.nfi_enabled || program?.medical_enabled) && (
         <>
           <div className="col-xl-5">
             <Panel title="Warehouses">
@@ -649,7 +712,7 @@ function ProgramSetup({
               />
             </Panel>
           </div>
-          <div className="col-xl-7">
+          {program?.nfi_enabled && <div className="col-xl-7">
             <Panel title="NFI catalogue and initial stock">
               <form onSubmit={createItem}>
                 <SelectField
@@ -684,10 +747,30 @@ function ProgramSetup({
                 ])}
               />
             </Panel>
-          </div>
+          </div>}
         </>
       )}
-      {selected && !program?.nfi_enabled && (
+      {program && (
+        <div className="col-12">
+          <Panel title="Edit program information and modalities">
+            <form key={program.id} onSubmit={updateProgram}>
+              <div className="row">
+                <div className="col-md-6"><Field label="Program name" name="edit_name" defaultValue={valueOf(program, "name")} required /></div>
+                <div className="col-md-6"><Field label="Country" name="edit_country" defaultValue={valueOf(program, "country")} required /></div>
+                <div className="col-md-6"><Field label="Start date" name="edit_start_date" type="date" defaultValue={valueOf(program, "start_date")} /></div>
+                <div className="col-md-6"><Field label="End date" name="edit_end_date" type="date" defaultValue={valueOf(program, "end_date")} /></div>
+              </div>
+              <div className="d-flex flex-wrap gap-3 mb-3">
+                {[["edit_cash_enabled", "Payment / Cash", program.cash_enabled], ["edit_nfi_enabled", "NFI / In-Kind", program.nfi_enabled], ["edit_medical_enabled", "Medical Assistance", program.medical_enabled]].map(([name, label, enabled]) => (
+                  <div className="form-check" key={String(name)}><input className="form-check-input" id={String(name)} name={String(name)} type="checkbox" defaultChecked={Boolean(enabled)} /><label className="form-check-label" htmlFor={String(name)}>{String(label)}</label></div>
+                ))}
+              </div>
+              <button className="btn btn-outline-primary" disabled={status === "saving"}>Save program changes</button>
+            </form>
+          </Panel>
+        </div>
+      )}
+      {selected && !(program?.nfi_enabled || program?.medical_enabled) && (
         <div className="col-12">
           <Panel title="NFI setup">
             <p className="form-text">

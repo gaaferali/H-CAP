@@ -6,7 +6,15 @@ from django.utils import timezone
 from rest_framework import serializers
 
 from accounts.models import IdempotencyRecord, Tenant, User
-from assistance.models import Beneficiary, CashEntitlement, Enrollment, Household, HouseholdEligibility, HouseholdEnrollment
+from assistance.models import (
+    Beneficiary,
+    CashEntitlement,
+    Enrollment,
+    Household,
+    HouseholdEligibility,
+    HouseholdEnrollment,
+    HouseholdModalityDecision,
+)
 from assistance.serializer_helpers import (
     approved_household_modality,
     household_member_count,
@@ -37,6 +45,7 @@ from reporting.models import AuditEvent
 
 
 
+# Validates and returns household eligibility decisions.
 class HouseholdEligibilitySerializer(serializers.ModelSerializer):
     beneficiaries = serializers.SerializerMethodField()
     household_reference = serializers.SerializerMethodField()
@@ -66,6 +75,45 @@ class HouseholdEligibilitySerializer(serializers.ModelSerializer):
         return attrs
 
 
+class HouseholdModalityDecisionInputSerializer(serializers.Serializer):
+    modality = serializers.ChoiceField(choices=HouseholdModalityDecision.Modality.choices)
+    status = serializers.ChoiceField(choices=HouseholdModalityDecision.Status.choices)
+    note = serializers.CharField(required=False, allow_blank=True, default="")
+
+
+class HouseholdModalityDecisionSerializer(serializers.ModelSerializer):
+    household_reference = serializers.SerializerMethodField()
+    program_name = serializers.CharField(source="program.name", read_only=True)
+    decided_by_name = serializers.CharField(source="decided_by.full_name", read_only=True, allow_null=True)
+
+    class Meta:
+        model = HouseholdModalityDecision
+        fields = "__all__"
+        read_only_fields = ["decided_by", "decided_at", "created_at", "updated_at"]
+
+    def get_household_reference(self, obj):
+        return household_reference(obj.household)
+
+    def validate(self, attrs):
+        household = attrs.get("household") or self.instance.household
+        program = attrs.get("program") or self.instance.program
+        modality = attrs.get("modality") or self.instance.modality
+        user = self.context["request"].user
+        if household.program_id != program.id:
+            raise serializers.ValidationError({"program": "Program must match the household program"})
+        if not user.is_superuser and program.tenant_id != user.tenant_id:
+            raise serializers.ValidationError("Program belongs to another tenant")
+        enabled = {
+            HouseholdModalityDecision.Modality.CASH: program.cash_enabled,
+            HouseholdModalityDecision.Modality.NFI: program.nfi_enabled,
+            HouseholdModalityDecision.Modality.MEDICAL: program.medical_enabled,
+        }
+        if not enabled[modality]:
+            raise serializers.ValidationError({"modality": f"{modality.title()} assistance is disabled for this program"})
+        return attrs
+
+
+# Validates household enrollment and the selected assistance modality.
 class HouseholdEnrollmentSerializer(serializers.ModelSerializer):
     household_reference = serializers.SerializerMethodField()
     member_count = serializers.SerializerMethodField()
@@ -73,6 +121,9 @@ class HouseholdEnrollmentSerializer(serializers.ModelSerializer):
     household_members = serializers.SerializerMethodField()
     eligibility_status = serializers.SerializerMethodField()
     program_name = serializers.CharField(source="program.name", read_only=True)
+    modality_decisions = HouseholdModalityDecisionInputSerializer(many=True, required=False, write_only=True)
+    modality_decision_details = serializers.SerializerMethodField()
+
     class Meta:
         model = HouseholdEnrollment
         fields = "__all__"
@@ -86,9 +137,49 @@ class HouseholdEnrollmentSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError({"program": "Program must match the household program"})
         if not user.is_superuser and program.tenant_id != user.tenant_id:
             raise serializers.ValidationError("Program belongs to another tenant")
+        decisions = attrs.get("modality_decisions")
+        if decisions:
+            modalities = [decision["modality"] for decision in decisions]
+            if len(modalities) != len(set(modalities)):
+                raise serializers.ValidationError({"modality_decisions": "Each modality may be decided only once."})
+            enabled = {
+                HouseholdModalityDecision.Modality.CASH: program.cash_enabled,
+                HouseholdModalityDecision.Modality.NFI: program.nfi_enabled,
+                HouseholdModalityDecision.Modality.MEDICAL: program.medical_enabled,
+            }
+            disabled = [modality for modality in modalities if not enabled[modality]]
+            if disabled:
+                raise serializers.ValidationError(
+                    {"modality_decisions": f"Disabled program modalities cannot be selected: {', '.join(disabled)}"}
+                )
+            modality_set = set(modalities)
+            if modality_set == {
+                HouseholdModalityDecision.Modality.CASH,
+                HouseholdModalityDecision.Modality.NFI,
+            }:
+                attrs["assistance_modality"] = Enrollment.AssistanceModality.CASH_NFI
+            elif HouseholdModalityDecision.Modality.MEDICAL in modality_set:
+                attrs["assistance_modality"] = Enrollment.AssistanceModality.MEDICAL
+            elif HouseholdModalityDecision.Modality.NFI in modality_set:
+                attrs["assistance_modality"] = Enrollment.AssistanceModality.NFI
+            else:
+                attrs["assistance_modality"] = Enrollment.AssistanceModality.CASH
+            statuses = {decision["status"] for decision in decisions}
+            if HouseholdModalityDecision.Status.APPROVED in statuses:
+                attrs["status"] = HouseholdEnrollment.Status.APPROVED
+            elif statuses == {HouseholdModalityDecision.Status.REJECTED}:
+                attrs["status"] = HouseholdEnrollment.Status.REJECTED
+            elif HouseholdModalityDecision.Status.SUSPENDED in statuses:
+                attrs["status"] = HouseholdEnrollment.Status.SUSPENDED
+            else:
+                attrs["status"] = HouseholdEnrollment.Status.PENDING
+            return attrs
         submitted_modality = self.initial_data.get("assistance_modality") if self.initial_data is not None else None
         modality = attrs.get("assistance_modality", self.instance.assistance_modality if self.instance else None)
-        if not submitted_modality and not self.instance and program.nfi_enabled and not program.cash_enabled:
+        if not submitted_modality and not self.instance and program.medical_enabled and not program.cash_enabled and not program.nfi_enabled:
+            modality = Enrollment.AssistanceModality.MEDICAL
+            attrs["assistance_modality"] = modality
+        elif not submitted_modality and not self.instance and program.nfi_enabled and not program.cash_enabled:
             modality = Enrollment.AssistanceModality.NFI
             attrs["assistance_modality"] = modality
         if modality == Enrollment.AssistanceModality.CASH and not program.cash_enabled:
@@ -97,7 +188,61 @@ class HouseholdEnrollmentSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError({"assistance_modality": "NFI is disabled for this program"})
         if modality == Enrollment.AssistanceModality.CASH_NFI and not (program.cash_enabled and program.nfi_enabled):
             raise serializers.ValidationError({"assistance_modality": "Payment + NFI requires both modalities to be enabled"})
+        if modality == Enrollment.AssistanceModality.MEDICAL and not program.medical_enabled:
+            raise serializers.ValidationError({"assistance_modality": "Medical assistance is disabled for this program"})
         return attrs
+
+    def create(self, validated_data):
+        decisions = validated_data.pop("modality_decisions", None)
+        instance = super().create(validated_data)
+        self._save_modality_decisions(instance, decisions)
+        return instance
+
+    def update(self, instance, validated_data):
+        decisions = validated_data.pop("modality_decisions", None)
+        instance = super().update(instance, validated_data)
+        self._save_modality_decisions(instance, decisions)
+        return instance
+
+    def _save_modality_decisions(self, instance, decisions):
+        if decisions is None:
+            if instance.assistance_modality == Enrollment.AssistanceModality.CASH_NFI:
+                modalities = [HouseholdModalityDecision.Modality.CASH, HouseholdModalityDecision.Modality.NFI]
+            else:
+                modalities = [instance.assistance_modality]
+            status_map = {
+                HouseholdEnrollment.Status.ACCEPTED: HouseholdModalityDecision.Status.APPROVED,
+                HouseholdEnrollment.Status.APPROVED: HouseholdModalityDecision.Status.APPROVED,
+                HouseholdEnrollment.Status.REJECTED: HouseholdModalityDecision.Status.REJECTED,
+                HouseholdEnrollment.Status.SUSPENDED: HouseholdModalityDecision.Status.SUSPENDED,
+            }
+            decisions = [
+                {
+                    "modality": modality,
+                    "status": status_map.get(instance.status, HouseholdModalityDecision.Status.PENDING),
+                    "note": instance.note,
+                }
+                for modality in modalities
+            ]
+        actor = self.context["request"].user
+        for decision in decisions:
+            status_value = decision["status"]
+            decided = status_value != HouseholdModalityDecision.Status.PENDING
+            HouseholdModalityDecision.objects.update_or_create(
+                household=instance.household,
+                program=instance.program,
+                modality=decision["modality"],
+                defaults={
+                    "status": status_value,
+                    "note": decision.get("note", ""),
+                    "decided_by": actor if decided else None,
+                    "decided_at": timezone.now() if decided else None,
+                },
+            )
+
+    def get_modality_decision_details(self, obj):
+        decisions = obj.household.modality_decisions.filter(program=obj.program).select_related("decided_by")
+        return HouseholdModalityDecisionSerializer(decisions, many=True, context=self.context).data
 
     def get_household_size(self, obj):
         return obj.household.household_size
@@ -118,6 +263,7 @@ class HouseholdEnrollmentSerializer(serializers.ModelSerializer):
         return household_member_count(obj.household)
 
 
+# Validates cash entitlement amounts against the selected program and enrollment.
 class CashEntitlementSerializer(serializers.ModelSerializer):
     household_reference = serializers.SerializerMethodField()
     household_member_count = serializers.SerializerMethodField()
@@ -139,6 +285,8 @@ class CashEntitlementSerializer(serializers.ModelSerializer):
         user = self.context["request"].user
         if not household or household.program_id != program.id:
             raise serializers.ValidationError({"household": "Household must be registered in the selected program"})
+        if household.participation_status != Household.ParticipationStatus.ACTIVE:
+            raise serializers.ValidationError({"household": "This household has been withdrawn from the program."})
         if beneficiary and beneficiary.household_id != household.id:
             raise serializers.ValidationError({"beneficiary": "Member must belong to the selected household"})
         if not user.is_superuser and program.tenant_id != user.tenant_id:
@@ -185,6 +333,7 @@ class CashEntitlementSerializer(serializers.ModelSerializer):
         return (self.get_budget_total(obj) or 0) - (self.get_budget_committed(obj) or 0) - successful_fees
 
 
+# Returns household references and readable program details for the frontend.
 class HouseholdSerializer(serializers.ModelSerializer):
     program_name = serializers.CharField(source="program.name", read_only=True)
     registration_reference = serializers.SerializerMethodField()
@@ -192,7 +341,10 @@ class HouseholdSerializer(serializers.ModelSerializer):
     class Meta:
         model = Household
         fields = "__all__"
-        read_only_fields = ["tenant", "created_by", "created_at"]
+        read_only_fields = [
+            "tenant", "created_by", "created_at", "participation_status",
+            "withdrawal_reason", "withdrawn_at", "withdrawn_by",
+        ]
 
     def validate_program(self, program):
         if program.tenant_id != self.context["request"].user.tenant_id:
@@ -223,6 +375,7 @@ class HouseholdSerializer(serializers.ModelSerializer):
         return household_reference(household)
 
 
+# Protects personal identifiers while returning readable beneficiary details.
 class BeneficiarySerializer(serializers.ModelSerializer):
     number = serializers.CharField(write_only=True, required=False)
     national_id = serializers.CharField(write_only=True, required=False)
@@ -291,6 +444,7 @@ class BeneficiarySerializer(serializers.ModelSerializer):
         return f"**** {phone_number[-4:]}" if phone_number else "Not recorded"
 
 
+# Validates beneficiary enrollment, approval, and modality rules.
 class EnrollmentSerializer(serializers.ModelSerializer):
     household_reference = serializers.SerializerMethodField()
     household_member_count = serializers.SerializerMethodField()

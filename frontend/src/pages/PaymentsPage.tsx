@@ -1,10 +1,9 @@
-import { FormEvent, ReactNode, useEffect, useMemo, useState } from "react";
+import { FormEvent, useEffect, useState } from "react";
 import { api, listItems } from "../api/api";
-import type { PlatformUser } from "../api/api";
 import type { Entity, Role } from "../types/types";
-import { Badge, Field, FunctionHelp, Message, Panel, SelectField, Table, Textarea } from "../components";
-import { TranslateTree, useTranslation } from "../i18n";
-import { beneficiaryLabel, distributionEventLabel, enrollmentLabel, householdLabel, nfiBeneficiaryLabel, nfiEntitlementLabel, programLabel, readableCode, valueOf } from "../utils";
+import { Badge, Field, Message, Panel, SelectField, Table } from "../components";
+import { programLabel, valueOf } from "../utils";
+// Shows the cash payment workflow from entitlement selection to payment history.
 export function PaymentsPage({ role }: { role: Role }) {
   const [programs, setPrograms] = useState<Entity[]>([]);
   const [cashEntitlements, setCashEntitlements] = useState<Entity[]>([]);
@@ -22,6 +21,7 @@ export function PaymentsPage({ role }: { role: Role }) {
   const [loading, setLoading] = useState(true);
   const [channelsLoading, setChannelsLoading] = useState(false);
   const canWrite = ["ADMIN", "FINANCE", "MANAGER"].includes(role);
+  // Gets programs, cash entitlements, batches, instructions, and payment events.
   const load = async () => {
     setLoading(true);
     setError("");
@@ -194,7 +194,8 @@ export function PaymentsPage({ role }: { role: Role }) {
       valueOf(item, "program") === programId &&
       valueOf(item, "eligibility_status") === "ELIGIBLE" &&
       valueOf(item, "status") === "APPROVED" &&
-      ["CASH", "CASH_NFI"].includes(valueOf(item, "assistance_modality")),
+      (["CASH", "CASH_NFI"].includes(valueOf(item, "assistance_modality")) ||
+        ((item.modality_decision_details as Entity[] | undefined) ?? []).some((decision) => valueOf(decision, "modality") === "CASH" && valueOf(decision, "status") === "APPROVED")),
   ).filter(
     (item, index, all) =>
       all.findIndex(
@@ -252,7 +253,7 @@ export function PaymentsPage({ role }: { role: Role }) {
                   name="payment-household"
                   options={eligibleHouseholds.map((item) => ({
                     value: valueOf(item, "household"),
-                    label: `${valueOf(item, "household_reference") || "Household"} â€” size ${valueOf(item, "household_size") || "?"} â€” ${valueOf(item, "member_count") || 0} members â€” ${valueOf(item, "assistance_modality")}`,
+                    label: `${valueOf(item, "household_reference") || "Household"} — size ${valueOf(item, "household_size") || "?"} — ${valueOf(item, "member_count") || 0} members — ${valueOf(item, "assistance_modality")}`,
                   }))}
                   value={householdId}
                   onChange={setHouseholdId}
@@ -274,7 +275,7 @@ export function PaymentsPage({ role }: { role: Role }) {
                   name="channel_config"
                   options={channels.map((channel) => ({
                     value: channel.id,
-                    label: `${valueOf(channel, "provider_name")} (${valueOf(channel, "channel_type")}) â€” fee ${valueOf(channel, "fee_amount") || 0} ${valueOf(channel, "currency")}`,
+                    label: `${valueOf(channel, "provider_name")} (${valueOf(channel, "channel_type")}) — fee ${valueOf(channel, "fee_amount") || 0} ${valueOf(channel, "currency")}`,
                   }))}
                   value={channelId}
                   onChange={setChannelId}
@@ -346,7 +347,7 @@ export function PaymentsPage({ role }: { role: Role }) {
                   "Household",
                   valueOf(entitlement, "household_size") ||
                     valueOf(householdEnrollment, "household_size") ||
-                    "â€”",
+                    "—",
                   valueOf(entitlement, "household_member_count") ||
                     valueOf(householdEnrollment, "member_count") ||
                     0,
@@ -380,7 +381,7 @@ export function PaymentsPage({ role }: { role: Role }) {
                 ),
                 canWrite && valueOf(item, "status") === "FAILED" ? (
                   <button className="btn btn-sm btn-outline-secondary" onClick={() => void simulate(item.id, "retry")}>Retry</button>
-                ) : "â€”",
+                ) : "—",
               ];
             })}
           />

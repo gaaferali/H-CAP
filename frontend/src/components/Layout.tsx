@@ -15,11 +15,22 @@ type LayoutProps = {
   onSignOut: () => void;
 };
 
+const secondaryRouteTitles: Partial<Record<Route, string>> = {
+  medical_entitlements: "Medical entitlements",
+  medical_distribution: "Medical distribution",
+  profile: "Profile settings",
+};
+
+// Shows the page header, navigation, language control, and signed-in user details.
 export function Layout({
   children, locale, route, user, translate, onNavigate, onLocaleChange, onSignOut,
 }: LayoutProps) {
   const role = user.role as Role;
-  const title = translate("Humanitarian Cash Assistance Platform");
+  const routeTitle = nav.find(([item]) => item === route)?.[1]
+    ?? secondaryRouteTitles[route]
+    ?? "Dashboard";
+  const title = translate(routeTitle);
+  const platformName = translate("Humanitarian Cash Assistance Platform");
   const subtitle = translate("Secure, accountable assistance delivery");
 
   return (
@@ -41,7 +52,11 @@ export function Layout({
       </aside>
       <main className="workspace" id="main">
         <header className="topbar">
-          <div><p className="eyebrow">{subtitle}</p><h1>{title}</h1></div>
+          <div className="topbar-copy">
+            <p className="eyebrow">{platformName}</p>
+            <h1>{title}</h1>
+            <p className="topbar-description">{subtitle}</p>
+          </div>
           <div className="topbar-actions">
             <button className="btn btn-outline-primary btn-sm" onClick={() => onNavigate("profile")}>
               <UserCog size={16} /> {translate("Edit profile")}

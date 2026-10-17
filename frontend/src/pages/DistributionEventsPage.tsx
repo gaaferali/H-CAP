@@ -1,11 +1,14 @@
-import { FormEvent, ReactNode, useEffect, useMemo, useState } from "react";
+import { FormEvent, useEffect, useState } from "react";
 import { api, listItems } from "../api/api";
-import type { PlatformUser } from "../api/api";
 import type { Entity, Role } from "../types/types";
-import { Badge, Field, FunctionHelp, Message, Panel, SelectField, Table, Textarea } from "../components";
-import { TranslateTree, useTranslation } from "../i18n";
-import { beneficiaryLabel, distributionEventLabel, enrollmentLabel, householdLabel, nfiBeneficiaryLabel, nfiEntitlementLabel, programLabel, readableCode, valueOf } from "../utils";
-export function DistributionEventsPage({ role }: { role: Role }) {
+import { Badge, Field, Message, Panel, SelectField, Table, Textarea } from "../components";
+import { distributionEventLabel, nfiEntitlementLabel, programLabel, valueOf } from "../utils";
+import { MedicalPage } from "./MedicalPage";
+
+type DistributionModality = "NFI" | "MEDICAL";
+
+// Shows NFI event planning, entitlement allocation, and saved distribution records.
+function NfiDistributionEventsPanel({ role }: { role: Role }) {
   const [programs, setPrograms] = useState<Entity[]>([]);
   const [warehouses, setWarehouses] = useState<Entity[]>([]);
   const [entitlements, setEntitlements] = useState<Entity[]>([]);
@@ -17,6 +20,7 @@ export function DistributionEventsPage({ role }: { role: Role }) {
   const [status, setStatus] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
+  // Gets programs, warehouses, entitlements, events, and allocations for this page.
   const load = async () => {
     setLoading(true);
     setError("");
@@ -285,6 +289,30 @@ export function DistributionEventsPage({ role }: { role: Role }) {
             <Message status="" error={error} />
           </>
         )}
+      </div>
+    </div>
+  );
+}
+
+// Switches between the NFI and medical distribution workspaces.
+export function DistributionEventsPage({ role, initialModality = "NFI" }: { role: Role; initialModality?: DistributionModality }) {
+  const [modality, setModality] = useState<DistributionModality>(initialModality);
+  return (
+    <div className="row g-3">
+      <div className="col-12">
+        <Panel title="Distribution Events">
+          <p className="section-lead">Plan and review NFI and Medical distribution records in one workspace. Completed issues remain immutable.</p>
+          <div className="workspace-tabs" role="tablist" aria-label="Distribution modality">
+            {(["NFI", "MEDICAL"] as DistributionModality[]).map((item) => (
+              <button key={item} type="button" className={`btn ${modality === item ? "btn-primary" : "btn-outline-primary"}`} onClick={() => setModality(item)}>
+                {item === "NFI" ? "NFI" : "Medical"}
+              </button>
+            ))}
+          </div>
+        </Panel>
+      </div>
+      <div className="col-12">
+        {modality === "NFI" ? <NfiDistributionEventsPanel role={role} /> : <MedicalPage role={role} view="distribution" />}
       </div>
     </div>
   );

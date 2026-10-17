@@ -8,7 +8,12 @@ from django.utils import timezone as django_timezone
 from accounts.models import Tenant, User
 from programs.models import Program
 
+# Households table for registered families inside a program.
 class Household(models.Model):
+    class ParticipationStatus(models.TextChoices):
+        ACTIVE = "ACTIVE", "Active"
+        WITHDRAWN = "WITHDRAWN", "Withdrawn"
+
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     tenant = models.ForeignKey(Tenant, on_delete=models.PROTECT, related_name="households")
     program = models.ForeignKey(Program, on_delete=models.PROTECT, related_name="households")
@@ -16,6 +21,20 @@ class Household(models.Model):
     location = models.CharField(max_length=255)
     registration_date = models.DateField()
     registration_reference = models.CharField(max_length=120, blank=True)
+    participation_status = models.CharField(
+        max_length=20,
+        choices=ParticipationStatus.choices,
+        default=ParticipationStatus.ACTIVE,
+    )
+    withdrawal_reason = models.TextField(blank=True)
+    withdrawn_at = models.DateTimeField(null=True, blank=True)
+    withdrawn_by = models.ForeignKey(
+        User,
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="withdrawn_households",
+    )
     created_by = models.ForeignKey(User, on_delete=models.PROTECT, related_name="created_households")
     created_at = models.DateTimeField(default=django_timezone.now)
 
@@ -44,6 +63,7 @@ class Household(models.Model):
         self.registration_reference = value or ""
 
 
+# Beneficiaries table for individual household members and their verification data.
 class Beneficiary(models.Model):
     class VerificationStatus(models.TextChoices):
         PENDING = "PENDING", "Pending"
@@ -85,11 +105,13 @@ class Beneficiary(models.Model):
         return (self.phone_number or "")[-4:]
 
 
+# Beneficiary enrollments table with approval and assistance modality decisions.
 class Enrollment(models.Model):
     class AssistanceModality(models.TextChoices):
         CASH = "CASH", "Payment"
         NFI = "NFI", "NFI"
         CASH_NFI = "CASH_NFI", "Payment + NFI"
+        MEDICAL = "MEDICAL", "Medical Assistance"
     class EligibilityStatus(models.TextChoices):
         PENDING = "PENDING", "Pending"
         ELIGIBLE = "ELIGIBLE", "Eligible"
@@ -118,6 +140,7 @@ class Enrollment(models.Model):
         constraints = [models.UniqueConstraint(fields=["program", "beneficiary"], name="unique_enrollment_per_program_beneficiary")]
 
 
+# Records the human eligibility decision for a household and program.
 class HouseholdEligibility(models.Model):
     class Status(models.TextChoices):
         PENDING = "PENDING", "Pending"
@@ -137,6 +160,7 @@ class HouseholdEligibility(models.Model):
         db_table = "core_householdeligibility"
 
 
+# Records household-level enrollment before assistance is delivered.
 class HouseholdEnrollment(models.Model):
     class Status(models.TextChoices):
         PENDING = "PENDING", "Pending"
@@ -159,6 +183,50 @@ class HouseholdEnrollment(models.Model):
         db_table = "core_householdenrollment"
 
 
+# Stores the approved CASH, NFI, or medical modality for an enrolled household.
+class HouseholdModalityDecision(models.Model):
+    """Independent approval state for each assistance modality in one enrollment."""
+
+    class Modality(models.TextChoices):
+        CASH = "CASH", "Payment"
+        NFI = "NFI", "NFI"
+        MEDICAL = "MEDICAL", "Medical Assistance"
+
+    class Status(models.TextChoices):
+        PENDING = "PENDING", "Pending"
+        APPROVED = "APPROVED", "Approved"
+        REJECTED = "REJECTED", "Rejected"
+        SUSPENDED = "SUSPENDED", "Suspended"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    household = models.ForeignKey(Household, on_delete=models.PROTECT, related_name="modality_decisions")
+    program = models.ForeignKey(Program, on_delete=models.PROTECT, related_name="household_modality_decisions")
+    modality = models.CharField(max_length=20, choices=Modality.choices)
+    status = models.CharField(max_length=20, choices=Status.choices, default=Status.PENDING)
+    note = models.TextField(blank=True)
+    decided_by = models.ForeignKey(
+        User,
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="household_modality_decisions",
+    )
+    decided_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(default=django_timezone.now)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "core_householdmodalitydecision"
+        ordering = ["program__name", "household_id", "modality"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["household", "program", "modality"],
+                name="unique_household_program_modality_decision",
+            )
+        ]
+
+
+# Cash entitlements table used before a payment instruction is created.
 class CashEntitlement(models.Model):
     class Status(models.TextChoices):
         ACTIVE = "ACTIVE", "Active"
@@ -174,6 +242,15 @@ class CashEntitlement(models.Model):
     valid_from = models.DateField(null=True, blank=True)
     valid_until = models.DateField(null=True, blank=True)
     status = models.CharField(max_length=20, choices=Status.choices, default=Status.ACTIVE)
+    cancellation_reason = models.TextField(blank=True)
+    cancelled_at = models.DateTimeField(null=True, blank=True)
+    cancelled_by = models.ForeignKey(
+        User,
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="cancelled_cash_entitlements",
+    )
     created_by = models.ForeignKey(User, on_delete=models.PROTECT, related_name="created_cash_entitlements")
     created_at = models.DateTimeField(default=django_timezone.now)
     updated_at = models.DateTimeField(auto_now=True)

@@ -1,11 +1,13 @@
-import { FormEvent, ReactNode, useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { api, listItems } from "../api/api";
 import type { PlatformUser } from "../api/api";
-import type { Entity, Role } from "../types/types";
-import { Badge, Field, FunctionHelp, Message, Panel, SelectField, Table, Textarea } from "../components";
-import { TranslateTree, useTranslation } from "../i18n";
-import { beneficiaryLabel, distributionEventLabel, enrollmentLabel, householdLabel, nfiBeneficiaryLabel, nfiEntitlementLabel, programLabel, readableCode, valueOf } from "../utils";
+import type { Entity } from "../types/types";
+import { Badge, Message, Panel, SelectField, Table } from "../components";
+import { useTranslation } from "../i18n";
+import { programLabel, readableCode, valueOf } from "../utils";
+// Shows role-based program totals and recent operational records.
 export function Dashboard({ user }: { user: PlatformUser }) {
+  const translate = useTranslation();
   const [tenants, setTenants] = useState<Entity[]>([]);
   const [programs, setPrograms] = useState<Entity[]>([]);
   const [tenantId, setTenantId] = useState("");
@@ -98,6 +100,12 @@ export function Dashboard({ user }: { user: PlatformUser }) {
               "budget_planned",
               "budget_actual",
               "budget_remaining",
+              "medical_products",
+              "medical_available_stock",
+              "medical_pending_entitlements",
+              "medical_distributed_quantity",
+              "medical_open_alerts",
+              "medical_equipment",
             ];
   const assignedComplaints = Array.isArray(summary?.assigned_complaints)
     ? (summary.assigned_complaints as Array<Record<string, unknown>>)
@@ -164,7 +172,7 @@ export function Dashboard({ user }: { user: PlatformUser }) {
         {metricKeys.map((key) => (
           <article className="kpi" key={key}>
             <strong>{String(summary?.[key] ?? "—")}</strong>
-            <span>{key.replaceAll("_", " ")}</span>
+            <span>{translate(readableCode(key))}</span>
           </article>
         ))}
       </section>

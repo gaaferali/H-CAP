@@ -1,10 +1,9 @@
-import { FormEvent, ReactNode, useEffect, useMemo, useState } from "react";
-import { api, listItems } from "../api/api";
+import { FormEvent, useState } from "react";
+import { api } from "../api/api";
 import type { PlatformUser } from "../api/api";
-import type { Entity, Role } from "../types/types";
-import { Badge, Field, FunctionHelp, Message, Panel, SelectField, Table, Textarea } from "../components";
+import { Field } from "../components";
 import { TranslateTree, useTranslation } from "../i18n";
-import { beneficiaryLabel, distributionEventLabel, enrollmentLabel, householdLabel, nfiBeneficiaryLabel, nfiEntitlementLabel, programLabel, readableCode, valueOf } from "../utils";
+// Shows the login form and returns the authenticated user to the application.
 export function Login({ onLogin }: { onLogin: (user: PlatformUser) => void }) {
   const translate = useTranslation();
   const [error, setError] = useState("");

@@ -30,6 +30,7 @@ class ModalityMatrixTests(TestCase):
             payment_cycle=Program.Cycle.MONTHLY if cash_enabled else "",
             cash_enabled=cash_enabled,
             nfi_enabled=nfi_enabled,
+            status=Program.Status.ACTIVE,
             created_by=self.manager,
         )
 

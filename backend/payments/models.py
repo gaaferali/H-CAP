@@ -9,6 +9,7 @@ from accounts.models import Tenant, User
 from assistance.models import Beneficiary, CashEntitlement, Enrollment
 from programs.models import Program
 
+# Payment channel settings for simulated program transfers.
 class PaymentChannelConfig(models.Model):
     class ChannelType(models.TextChoices):
         BANK = "BANK", "Bank"
@@ -33,6 +34,7 @@ class PaymentChannelConfig(models.Model):
         db_table = "core_paymentchannelconfig"
 
 
+# Payment instructions table with the amount, beneficiary, and delivery status.
 class PaymentInstruction(models.Model):
     class Status(models.TextChoices):
         DRAFT = "DRAFT", "Draft"
@@ -41,6 +43,7 @@ class PaymentInstruction(models.Model):
         SUCCESS = "SUCCESS", "Success"
         FAILED = "FAILED", "Failed"
         REVERSED = "REVERSED", "Reversed"
+        CANCELLED = "CANCELLED", "Cancelled before submission"
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     batch = models.ForeignKey("PaymentBatch", on_delete=models.PROTECT, null=True, blank=True, related_name="instructions")
@@ -73,6 +76,7 @@ class PaymentInstruction(models.Model):
         ]
 
 
+# Append-only payment history used to trace every payment status change.
 class PaymentEvent(models.Model):
     class EventType(models.TextChoices):
         CREATED = "CREATED", "Created"
@@ -83,6 +87,7 @@ class PaymentEvent(models.Model):
         REFUNDED = "REFUNDED", "Refunded"
         RETRY = "RETRY", "Retry"
         EXCEPTION = "EXCEPTION", "Exception"
+        CANCELLED = "CANCELLED", "Cancelled before submission"
 
     class ProviderStatus(models.TextChoices):
         NOT_SENT = "NOT_SENT", "Not sent"
@@ -107,6 +112,7 @@ class PaymentEvent(models.Model):
         db_table = "core_paymentevent"
 
 
+# Groups payment instructions that are prepared and processed together.
 class PaymentBatch(models.Model):
     class Status(models.TextChoices):
         DRAFT = "DRAFT", "Draft"
@@ -131,6 +137,7 @@ class PaymentBatch(models.Model):
         db_table = "core_paymentbatch"
 
 
+# Records payment differences that finance users need to review.
 class ReconciliationItem(models.Model):
     class IssueType(models.TextChoices):
         AMOUNT_MISMATCH = "AMOUNT_MISMATCH", "Amount mismatch"

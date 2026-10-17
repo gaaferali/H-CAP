@@ -35,14 +35,17 @@ from payments.models import PaymentBatch, PaymentChannelConfig, PaymentEvent, Pa
 from payments.serializers import PaymentBatchSerializer, PaymentChannelConfigSerializer, PaymentEventSerializer, PaymentInstructionSerializer, ReconciliationItemSerializer
 from programs.models import ActivityDependency, Budget, Program, ProgramActivity
 from programs.serializers import ActivityDependencySerializer, BudgetSerializer, ProgramActivitySerializer, ProgramSerializer
-from programs.services import payment_budget_totals, scoped_program
+from programs.services import payment_budget_totals, require_program_active, scoped_program
 from reporting.audit import audit, json_safe
+from assistance.serializer_helpers import approved_household_modality
+from payments.cash_validation import validate_cash_amount_or_raise
 from reporting.import_utils import normalize_import_header, normalize_import_rows
 from reporting.models import AuditEvent, PDMResponse
 from reporting.serializers import AuditEventSerializer
 
 
 
+# Creates payment instructions and records every simulated status change.
 class PaymentInstructionViewSet(RoleProtectedTenantViewSet):
     queryset = PaymentInstruction.objects.select_related(
         "cash_entitlement__program",
@@ -50,7 +53,7 @@ class PaymentInstructionViewSet(RoleProtectedTenantViewSet):
         "enrollment__program",
         "beneficiary",
         "channel_config",
-    )
+    ).order_by("-created_at", "id")
     serializer_class = PaymentInstructionSerializer
     allowed_roles = {User.Role.ADMIN, User.Role.FINANCE, User.Role.MANAGER, User.Role.AUDITOR, User.Role.REVIEWER}
     write_roles = {User.Role.ADMIN, User.Role.FINANCE, User.Role.MANAGER}
@@ -73,12 +76,27 @@ class PaymentInstructionViewSet(RoleProtectedTenantViewSet):
     def partial_update(self, request, *args, **kwargs):
         raise PermissionDenied("Payment instructions are immutable; use the controlled simulator actions")
 
+    def create(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        entitlement = serializer.validated_data.get("cash_entitlement")
+        household = entitlement.household if entitlement else serializer.validated_data["household"]
+        program = entitlement.program if entitlement else household.program
+        amount = entitlement.amount if entitlement else serializer.validated_data["amount"]
+        validate_cash_amount_or_raise(
+            program=program, household=household, amount=amount,
+            entity_type="PAYMENT_INSTRUCTION",
+            entity_id=f"payment:{entitlement.pk}" if entitlement else f"payment:{program.pk}:{household.pk}",
+        )
+        return super().create(request, *args, **kwargs)
+
     @transaction.atomic
     def perform_create(self, serializer):
         data = serializer.validated_data
         entitlement = data.get("cash_entitlement")
         household = data["household"] if not entitlement else entitlement.household
         program = Program.objects.select_for_update().get(pk=(entitlement.program_id if entitlement else household.program_id))
+        require_program_active(program, "payment instruction creation")
         if not Budget.objects.select_for_update().filter(program=program).exists():
             raise ValidationError({"program": "A program budget is required before creating a payment instruction"})
         channel = PaymentChannelConfig.objects.select_for_update().get(
@@ -107,15 +125,7 @@ class PaymentInstructionViewSet(RoleProtectedTenantViewSet):
             household=household,
             program=program,
             status=HouseholdEligibility.Status.ELIGIBLE,
-        ).exists() or not HouseholdEnrollment.objects.select_for_update().filter(
-            household=household,
-            program=program,
-            status=HouseholdEnrollment.Status.APPROVED,
-            assistance_modality__in=[
-                Enrollment.AssistanceModality.CASH,
-                Enrollment.AssistanceModality.CASH_NFI,
-            ],
-        ).exists():
+        ).exists() or not approved_household_modality(household, program, [Enrollment.AssistanceModality.CASH, Enrollment.AssistanceModality.CASH_NFI]):
             raise ValidationError({"cash_entitlement": "Payment instruction requires an approved household cash enrollment"})
         if entitlement and PaymentInstruction.objects.filter(cash_entitlement=entitlement).exists():
             raise ValidationError({"cash_entitlement": "A payment instruction already exists for this cash entitlement"})
@@ -179,11 +189,26 @@ class PaymentInstructionViewSet(RoleProtectedTenantViewSet):
             raise ValidationError({"outcome": "Use submit, success, failure, retry, or reversal"})
         old_status = instruction.status
         new_status, event_type = transitions[outcome]
+        program = Program.objects.select_for_update().get(pk=instruction.cash_entitlement.program_id)
+        allowed_from = {
+            "submit": {PaymentInstruction.Status.CREATED},
+            "success": {PaymentInstruction.Status.CREATED, PaymentInstruction.Status.SUBMITTED},
+            "failure": {PaymentInstruction.Status.CREATED, PaymentInstruction.Status.SUBMITTED},
+            "retry": {PaymentInstruction.Status.FAILED},
+            "reversal": {PaymentInstruction.Status.SUCCESS, PaymentInstruction.Status.FAILED},
+        }
+        if old_status not in allowed_from[outcome]:
+            raise ValidationError({"outcome": f"{outcome.title()} is not allowed from {instruction.get_status_display()}."})
+        if program.status == Program.Status.CLOSED:
+            raise ValidationError({"program": "A closed program cannot process payment outcomes."})
+        if program.status == Program.Status.PAUSED and old_status != PaymentInstruction.Status.SUBMITTED:
+            raise ValidationError({"program": "A paused program can only complete an already-submitted payment."})
+        if outcome in {"submit", "retry"}:
+            require_program_active(program, "payment submission")
         if outcome == "success" and old_status == PaymentInstruction.Status.SUCCESS:
             raise ValidationError({"outcome": "This payment already succeeded; its fee cannot be charged twice"})
         if new_status == PaymentInstruction.Status.REVERSED and old_status not in {PaymentInstruction.Status.SUCCESS, PaymentInstruction.Status.FAILED}:
             raise ValidationError({"outcome": "Only success or failed instructions can be reversed"})
-        program = instruction.cash_entitlement.program
         if not Budget.objects.select_for_update().filter(program=program).exists():
             raise ValidationError({"outcome": "The payment program has no configured budget"})
         if outcome == "success":
@@ -230,6 +255,7 @@ class PaymentInstructionViewSet(RoleProtectedTenantViewSet):
         return Response(PaymentEventSerializer(self.get_object().events.all().order_by("created_at"), many=True).data)
 
 
+# Groups eligible payment instructions into a finance batch.
 class PaymentBatchViewSet(RoleProtectedTenantViewSet):
     queryset = PaymentBatch.objects.select_related("program")
     serializer_class = PaymentBatchSerializer
@@ -249,6 +275,7 @@ class PaymentBatchViewSet(RoleProtectedTenantViewSet):
         audit(self.request.user, "PAYMENT_BATCH_CREATED", batch, after=PaymentBatchSerializer(batch).data, tenant=program.tenant)
 
 
+# Returns payment issues for finance reconciliation and resolution.
 class ReconciliationItemViewSet(RoleProtectedTenantViewSet):
     queryset = ReconciliationItem.objects.select_related("program", "instruction")
     serializer_class = ReconciliationItemSerializer

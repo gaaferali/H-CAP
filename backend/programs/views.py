@@ -36,7 +36,13 @@ from payments.models import PaymentBatch, PaymentChannelConfig, PaymentEvent, Pa
 from payments.serializers import PaymentBatchSerializer, PaymentChannelConfigSerializer, PaymentEventSerializer, PaymentInstructionSerializer, ReconciliationItemSerializer
 from programs.models import ActivityDependency, Budget, Program, ProgramActivity
 from programs.serializers import ActivityDependencySerializer, BudgetSerializer, ProgramActivitySerializer, ProgramSerializer
-from programs.services import payment_budget_totals, scoped_program
+from programs.services import (
+    payment_budget_totals,
+    program_dependency_summary,
+    require_reason,
+    scoped_program,
+    transition_program,
+)
 from reporting.audit import audit, json_safe
 from reporting.import_utils import normalize_import_header, normalize_import_rows
 from reporting.models import AuditEvent, PDMResponse
@@ -44,8 +50,9 @@ from reporting.serializers import AuditEventSerializer
 
 
 
+# Lists programs and handles setup, channels, and lifecycle actions.
 class ProgramViewSet(RoleProtectedTenantViewSet):
-    queryset = Program.objects.all()
+    queryset = Program.objects.order_by("-created_at", "id")
     serializer_class = ProgramSerializer
     allowed_roles = {
         User.Role.ADMIN,
@@ -60,51 +67,55 @@ class ProgramViewSet(RoleProtectedTenantViewSet):
 
     @transaction.atomic
     def destroy(self, request, *args, **kwargs):
-        program = self.get_object()
-        household_ids = list(program.households.values_list("id", flat=True))
-        beneficiary_ids = list(Beneficiary.objects.filter(household_id__in=household_ids).values_list("id", flat=True))
-        enrollment_ids = list(Enrollment.objects.filter(program=program).values_list("id", flat=True))
-        instruction_ids = list(
-            PaymentInstruction.objects.filter(
-                Q(enrollment_id__in=enrollment_ids) | Q(cash_entitlement__program=program)
-            ).values_list("id", flat=True)
-        )
-        activity_ids = list(program.activities.values_list("id", flat=True))
-        rule_ids = list(program.automation_rules.values_list("id", flat=True))
-        audit(request.user, "PROGRAM_DELETED", program, after={"deleted_dependency_counts": {"households": len(household_ids), "beneficiaries": len(beneficiary_ids), "enrollments": len(enrollment_ids), "payment_instructions": len(instruction_ids), "activities": len(activity_ids), "automation_rules": len(rule_ids)}}, tenant=program.tenant)
-        Complaint.objects.filter(Q(beneficiary_id__in=beneficiary_ids) | Q(instruction_id__in=instruction_ids)).delete()
-        PaymentDeliveryReview.objects.filter(payment_instruction_id__in=instruction_ids).delete()
-        PaymentEvent.objects.filter(instruction_id__in=instruction_ids).delete()
-        ReconciliationItem.objects.filter(Q(program=program) | Q(instruction_id__in=instruction_ids)).delete()
-        PaymentInstruction.objects.filter(id__in=instruction_ids).delete()
-        # Remove additive assistance records before their protected beneficiaries,
-        # items, warehouses, and program can be removed.
-        program_issue_ids = list(DistributionIssue.objects.filter(entitlement__program=program).values_list("id", flat=True))
-        DistributionIssue.objects.filter(id__in=program_issue_ids).delete()
-        DistributionAllocation.objects.filter(entitlement__program=program).delete()
-        NFIEntitlement.objects.filter(program=program).delete()
-        DistributionEvent.objects.filter(program=program).delete()
-        StockMovement.objects.filter(program=program).delete()
-        NFIItem.objects.filter(program=program).delete()
-        Warehouse.objects.filter(program=program).delete()
-        CashEntitlement.objects.filter(program=program).delete()
-        HouseholdEnrollment.objects.filter(program=program).delete()
-        HouseholdEligibility.objects.filter(program=program).delete()
-        Enrollment.objects.filter(id__in=enrollment_ids).delete()
-        Beneficiary.objects.filter(id__in=beneficiary_ids).delete()
-        Household.objects.filter(id__in=household_ids).delete()
-        ActivityDependency.objects.filter(Q(predecessor_id__in=activity_ids) | Q(successor_id__in=activity_ids)).delete()
-        ProgramActivity.objects.filter(id__in=activity_ids).delete()
-        AutomationExecution.objects.filter(rule_id__in=rule_ids).delete()
-        AutomationRule.objects.filter(id__in=rule_ids).delete()
-        AISignal.objects.filter(program=program).delete()
-        ReviewTask.objects.filter(program=program).delete()
-        PDMResponse.objects.filter(program=program).delete()
-        PaymentChannelConfig.objects.filter(program=program).delete()
-        PaymentBatch.objects.filter(program=program).delete()
-        Budget.objects.filter(program=program).delete()
+        program = Program.objects.select_for_update().get(pk=self.get_object().pk)
+        reason = require_reason(request.data.get("reason") or request.query_params.get("reason"))
+        if program.status != Program.Status.DRAFT:
+            raise ValidationError({"status": "Only an unused draft program can be deleted. Close programs with history instead."})
+        dependencies = program_dependency_summary(program)
+        if dependencies:
+            raise ValidationError(
+                {"program": "This program has related records and cannot be deleted. Keep it for audit history or close it.", "dependencies": dependencies}
+            )
+        audit(request.user, "PROGRAM_DELETED", program, after={"reason": reason}, tenant=program.tenant)
         program.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
+
+    def _transition(self, request, target_status):
+        program = self.get_object()
+        before = ProgramSerializer(program, context={"request": request}).data
+        program, changed = transition_program(
+            program=program,
+            target_status=target_status,
+            actor=request.user,
+            reason=request.data.get("reason"),
+        )
+        payload = ProgramSerializer(program, context={"request": request}).data
+        if changed:
+            audit(
+                request.user,
+                f"PROGRAM_{target_status}",
+                program,
+                before=before,
+                after={**payload, "reason": program.status_reason},
+                tenant=program.tenant,
+            )
+        return Response(payload)
+
+    @action(detail=True, methods=["post"])
+    def activate(self, request, pk=None):
+        return self._transition(request, Program.Status.ACTIVE)
+
+    @action(detail=True, methods=["post"])
+    def pause(self, request, pk=None):
+        return self._transition(request, Program.Status.PAUSED)
+
+    @action(detail=True, methods=["post"])
+    def close(self, request, pk=None):
+        return self._transition(request, Program.Status.CLOSED)
+
+    @action(detail=True, methods=["post"])
+    def reopen(self, request, pk=None):
+        return self._transition(request, Program.Status.PAUSED)
 
     def initial(self, request, *args, **kwargs):
         TenantScopedModelViewSet.initial(self, request, *args, **kwargs)
@@ -162,6 +173,7 @@ class ProgramViewSet(RoleProtectedTenantViewSet):
         return response
 
 
+# Creates and updates the operational activities for a program.
 class ProgramActivityViewSet(RoleProtectedTenantViewSet):
     queryset = ProgramActivity.objects.select_related("program", "owner")
     serializer_class = ProgramActivitySerializer
@@ -183,6 +195,7 @@ class ProgramActivityViewSet(RoleProtectedTenantViewSet):
         audit(self.request.user, "PROGRAM_ACTIVITY_CREATED", instance, after=ProgramActivitySerializer(instance).data, tenant=program.tenant)
 
 
+# Manages the required order between program activities.
 class ActivityDependencyViewSet(RoleProtectedTenantViewSet):
     queryset = ActivityDependency.objects.select_related("predecessor", "successor")
     serializer_class = ActivityDependencySerializer
@@ -199,6 +212,7 @@ class ActivityDependencyViewSet(RoleProtectedTenantViewSet):
         audit(self.request.user, "ACTIVITY_DEPENDENCY_CREATED", instance, after=serializer.data, tenant=instance.predecessor.tenant)
 
 
+# Returns the budget that belongs to a cash-enabled program.
 class BudgetViewSet(RoleProtectedTenantViewSet):
     queryset = Budget.objects.select_related("program")
     serializer_class = BudgetSerializer

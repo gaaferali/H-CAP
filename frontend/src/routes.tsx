@@ -1,6 +1,6 @@
 import {
-  Banknote, BarChart3, Bot, ClipboardCheck, FileText, FileUp, Globe2,
-  LayoutDashboard, MessageSquareWarning, ShieldCheck, UserCog, Users,
+  Banknote, BarChart3, Bot, ClipboardCheck, FileUp, Globe2,
+  HeartPulse, LayoutDashboard, MessageSquareWarning, PackageSearch, ShieldCheck, Stethoscope, UserCog, Users,
 } from "lucide-react";
 import type { Dispatch, SetStateAction } from "react";
 
@@ -11,6 +11,7 @@ import {
   EligibilityPage, EnrollmentModalityPage, EntitlementsPage, ImportsPage,
   Intake, PaymentsPage, PdmPage, ProfilePage, ProgramsPage, TenantsPage,
   UsersPage,
+  MedicalPage,
 } from "./pages";
 
 export const roleRoutes: Record<Route, Role[]> = {
@@ -32,6 +33,11 @@ export const roleRoutes: Record<Route, Role[]> = {
   nfi_entitlements: ["ADMIN", "MANAGER", "FINANCE", "REVIEWER", "AUDITOR"],
   distribution_events: ["ADMIN", "MANAGER", "REVIEWER", "FINANCE", "AUDITOR"],
   delivery_review: ["ADMIN", "MANAGER", "REVIEWER", "FINANCE", "AUDITOR"],
+  medical: ["ADMIN", "MANAGER", "REVIEWER", "FINANCE", "AUDITOR"],
+  medical_inventory: ["ADMIN", "MANAGER", "REVIEWER", "FINANCE", "AUDITOR"],
+  medical_entitlements: ["ADMIN", "MANAGER", "REVIEWER", "FINANCE", "AUDITOR"],
+  medical_distribution: ["ADMIN", "MANAGER", "REVIEWER", "FINANCE", "AUDITOR"],
+  medical_equipment: ["ADMIN", "MANAGER", "REVIEWER", "FINANCE", "AUDITOR"],
   users: ["ADMIN", "MANAGER"],
   profile: ["ADMIN", "FIELD_OFFICER", "FINANCE", "REVIEWER", "SUPPORT", "MANAGER", "AUDITOR"],
 };
@@ -55,6 +61,9 @@ export const nav: Array<[Route, string, typeof LayoutDashboard]> = [
   ["nfi_entitlements", "Entitlement", ClipboardCheck],
   ["distribution_events", "Distribution Events", ClipboardCheck],
   ["delivery_review", "Delivery Review", ClipboardCheck],
+  ["medical", "Medical Assistance", HeartPulse],
+  ["medical_inventory", "Medical inventory", PackageSearch],
+  ["medical_equipment", "Medical equipment", Stethoscope],
   ["users", "User administration", UserCog],
 ];
 
@@ -66,6 +75,9 @@ export const routePaths: Record<Route, string> = {
   audit: "audit", imports: "imports", automation: "automation", assistance: "assistance",
   nfi_entitlements: "entitlements", distribution_events: "distribution-events",
   delivery_review: "delivery-review", users: "users", profile: "profile",
+  medical: "medical", medical_inventory: "medical/inventory",
+  medical_entitlements: "medical/entitlements", medical_distribution: "medical/distribution",
+  medical_equipment: "medical/equipment",
 };
 
 export const routeFromHash = (): Route =>
@@ -94,6 +106,11 @@ export function renderRoute(
   if (route === "nfi_entitlements") return <EntitlementsPage role={role} />;
   if (route === "distribution_events") return <DistributionEventsPage role={role} />;
   if (route === "delivery_review") return <DeliveryReviewPage role={role} />;
+  if (route === "medical") return <MedicalPage role={role} view="overview" />;
+  if (route === "medical_inventory") return <MedicalPage role={role} view="inventory" />;
+  if (route === "medical_entitlements") return <EntitlementsPage role={role} initialModality="MEDICAL" />;
+  if (route === "medical_distribution") return <DistributionEventsPage role={role} initialModality="MEDICAL" />;
+  if (route === "medical_equipment") return <MedicalPage role={role} view="equipment" />;
   if (route === "users") return <UsersPage system={user.is_superuser} />;
   if (route === "profile") return <ProfilePage user={user} onUpdated={setUser} />;
   return <AuditPage />;

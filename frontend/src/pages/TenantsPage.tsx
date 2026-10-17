@@ -1,10 +1,9 @@
-import { FormEvent, ReactNode, useEffect, useMemo, useState } from "react";
+import { FormEvent, useEffect, useState } from "react";
 import { api, listItems } from "../api/api";
-import type { PlatformUser } from "../api/api";
-import type { Entity, Role } from "../types/types";
-import { Badge, Field, FunctionHelp, Message, Panel, SelectField, Table, Textarea } from "../components";
-import { TranslateTree, useTranslation } from "../i18n";
-import { beneficiaryLabel, distributionEventLabel, enrollmentLabel, householdLabel, nfiBeneficiaryLabel, nfiEntitlementLabel, programLabel, readableCode, valueOf } from "../utils";
+import type { Entity } from "../types/types";
+import { Badge, Field, Message, Panel, Table } from "../components";
+import { valueOf } from "../utils";
+// Shows tenant organisations and the form used to register a new tenant.
 export function TenantsPage() {
   const [tenants, setTenants] = useState<Entity[]>([]);
   const [status, setStatus] = useState("");

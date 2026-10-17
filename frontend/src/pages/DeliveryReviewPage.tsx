@@ -1,11 +1,11 @@
-import { FormEvent, ReactNode, useEffect, useMemo, useState } from "react";
+import { FormEvent, useEffect, useState } from "react";
 import { api, listItems } from "../api/api";
-import type { PlatformUser } from "../api/api";
 import type { Entity, Role } from "../types/types";
-import { Badge, Field, FunctionHelp, Message, Panel, SelectField, Table, Textarea } from "../components";
-import { TranslateTree, useTranslation } from "../i18n";
-import { beneficiaryLabel, distributionEventLabel, enrollmentLabel, householdLabel, nfiBeneficiaryLabel, nfiEntitlementLabel, programLabel, readableCode, valueOf } from "../utils";
+import { Badge, Field, Message, Panel, SelectField, Table, Textarea } from "../components";
+import { distributionEventLabel, nfiEntitlementLabel, programLabel, valueOf } from "../utils";
+// Shows payment and NFI delivery records that need a reviewer decision.
 export function DeliveryReviewPage({ role }: { role: Role }) {
+  const [programs, setPrograms] = useState<Entity[]>([]);
   const [allocations, setAllocations] = useState<Entity[]>([]);
   const [issues, setIssues] = useState<Entity[]>([]);
   const [paymentInstructions, setPaymentInstructions] = useState<Entity[]>([]);
@@ -13,19 +13,23 @@ export function DeliveryReviewPage({ role }: { role: Role }) {
   const [paymentEvents, setPaymentEvents] = useState<Entity[]>([]);
   const [selectedPaymentId, setSelectedPaymentId] = useState("");
   const [selectedId, setSelectedId] = useState("");
+  const [programId, setProgramId] = useState("");
   const [status, setStatus] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
+  // Gets programs, allocations, issues, payments, and their saved reviews.
   const load = async () => {
     setLoading(true);
     setError("");
     try {
-      const [allocationResponse, issueResponse, paymentResponse, reviewResponse] = await Promise.all([
+      const [programResponse, allocationResponse, issueResponse, paymentResponse, reviewResponse] = await Promise.all([
+        api.list<Entity>("programs"),
         api.list<Entity>("distribution-allocations"),
         api.list<Entity>("distribution-issues"),
         api.list<Entity>("payment-instructions"),
         api.list<Entity>("payment-delivery-reviews"),
       ]);
+      setPrograms(listItems(programResponse));
       setAllocations(listItems(allocationResponse));
       setIssues(listItems(issueResponse));
       const paymentRows = listItems(paymentResponse);
@@ -48,6 +52,7 @@ export function DeliveryReviewPage({ role }: { role: Role }) {
   }, []);
   const pending = allocations.filter(
     (row) =>
+      (!programId || valueOf(row, "program_id") === programId) &&
       !issues.some(
         (issue) =>
           valueOf(issue, "event") === valueOf(row, "event") &&
@@ -57,9 +62,19 @@ export function DeliveryReviewPage({ role }: { role: Role }) {
   const selected = pending.find((row) => row.id === selectedId);
   const pendingPayments = paymentInstructions.filter(
     (row) => ["SUCCESS", "FAILED", "REVERSED"].includes(valueOf(row, "status")) &&
+      (!programId || valueOf(row, "program_id") === programId) &&
       !paymentReviews.some((review) => valueOf(review, "payment_instruction") === row.id),
   );
   const selectedPayment = pendingPayments.find((row) => row.id === selectedPaymentId);
+  const visiblePaymentReviews = paymentReviews.filter(
+    (row) => !programId || valueOf(row, "program") === programId,
+  );
+  const visiblePaymentEvents = paymentEvents.filter(
+    (row) => !programId || valueOf(row, "program_id") === programId || valueOf(row, "program_name") === valueOf(programs.find((program) => program.id === programId), "name"),
+  );
+  const visibleIssues = issues.filter(
+    (row) => !programId || valueOf(row, "program_id") === programId,
+  );
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (!selected) return;
@@ -124,6 +139,20 @@ export function DeliveryReviewPage({ role }: { role: Role }) {
           <p className="section-lead">
             Review NFI delivery outcomes and household payment receipt decisions without changing entitlement or eligibility records.
           </p>
+          {canWrite && (
+            <SelectField
+              label="Program"
+              name="review_program"
+              options={programs.map((program) => ({ value: program.id, label: programLabel(program) }))}
+              value={programId}
+              onChange={(value) => {
+                setProgramId(value);
+                setSelectedPaymentId("");
+                setSelectedId("");
+              }}
+              required
+            />
+          )}
         </Panel>
       </div>
       {canWrite && (
@@ -154,10 +183,10 @@ export function DeliveryReviewPage({ role }: { role: Role }) {
       )}
       <div className={canWrite ? "col-xl-7" : "col-12"}>
         <Panel title="Payment delivery history">
-          <Table loading={loading} headings={["Household", "Program", "Payment", "Fee", "Total", "Channel", "Payment status", "Review", "Reviewer", "Time"]} rows={paymentReviews.map((row) => [valueOf(row, "household_reference") || "Household", valueOf(row, "program_name") || "Program", valueOf(row, "payment_amount"), valueOf(row, "fee_amount"), valueOf(row, "total_financial_impact"), valueOf(row, "channel_name"), valueOf(row, "payment_status"), <Badge value={valueOf(row, "delivery_status")} />, valueOf(row, "reviewer_name"), valueOf(row, "reviewed_at")])} />
+          <Table loading={loading} headings={["Household", "Program", "Payment", "Fee", "Total", "Channel", "Payment status", "Review", "Reviewer", "Time"]} rows={visiblePaymentReviews.map((row) => [valueOf(row, "household_reference") || "Household", valueOf(row, "program_name") || "Program", valueOf(row, "payment_amount"), valueOf(row, "fee_amount"), valueOf(row, "total_financial_impact"), valueOf(row, "channel_name"), valueOf(row, "payment_status"), <Badge value={valueOf(row, "delivery_status")} />, valueOf(row, "reviewer_name"), valueOf(row, "reviewed_at")])} />
         </Panel>
         <Panel title="Payment events reviewed">
-          <Table loading={loading} headings={["Action", "Household", "Program", "Status", "Performed by", "Time"]} rows={paymentEvents.map((row) => [valueOf(row, "action"), valueOf(row, "household_reference"), valueOf(row, "program_name"), valueOf(row, "provider_status") || valueOf(row, "to_status"), valueOf(row, "actor_name") || "System", valueOf(row, "created_at")])} />
+          <Table loading={loading} headings={["Action", "Household", "Program", "Status", "Performed by", "Time"]} rows={visiblePaymentEvents.map((row) => [valueOf(row, "action"), valueOf(row, "household_reference"), valueOf(row, "program_name"), valueOf(row, "provider_status") || valueOf(row, "to_status"), valueOf(row, "actor_name") || "System", valueOf(row, "created_at")])} />
         </Panel>
       </div>
       {canWrite && (
@@ -271,7 +300,7 @@ export function DeliveryReviewPage({ role }: { role: Role }) {
               "Status",
               "Notes",
             ]}
-            rows={issues.map((row) => [
+            rows={visibleIssues.map((row) => [
               distributionEventLabel(row),
               valueOf(row, "program_name") || "Program",
               valueOf(row, "household_reference") || "Household",

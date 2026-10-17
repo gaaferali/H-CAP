@@ -10,6 +10,7 @@ from assistance.models import Beneficiary, Household
 from payments.models import PaymentInstruction
 from programs.models import Program
 
+# Stores reviewer decisions about completed or failed payment delivery.
 class PaymentDeliveryReview(models.Model):
     class DeliveryStatus(models.TextChoices):
         RECEIVED = "RECEIVED", "Received"
@@ -104,6 +105,7 @@ class ComplaintAIAnalysis(models.Model):
         db_table = "core_complaintaianalysis"
 
 
+# Warehouses table for program stock and distribution locations.
 class Warehouse(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     program = models.ForeignKey(Program, on_delete=models.PROTECT, related_name="warehouses")
@@ -120,6 +122,7 @@ class Warehouse(models.Model):
         db_table = "core_warehouse"
 
 
+# NFI items table with the unit and minimum stock level.
 class NFIItem(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     program = models.ForeignKey(Program, on_delete=models.PROTECT, related_name="nfi_items")
@@ -139,6 +142,7 @@ class NFIItem(models.Model):
         db_table = "core_nfiitem"
 
 
+# NFI entitlements table for approved beneficiary items and quantities.
 class NFIEntitlement(models.Model):
     class Status(models.TextChoices):
         ACTIVE = "ACTIVE", "Active"
@@ -163,6 +167,7 @@ class NFIEntitlement(models.Model):
         db_table = "core_nfientitlement"
 
 
+# Append-only NFI stock history for receipts, reservations, issues, and adjustments.
 class StockMovement(models.Model):
     class MovementType(models.TextChoices):
         ENTRY = "ENTRY", "Entry"
@@ -186,6 +191,7 @@ class StockMovement(models.Model):
         db_table = "core_stockmovement"
 
 
+# Distribution events table for planned NFI or medical delivery sessions.
 class DistributionEvent(models.Model):
     class Status(models.TextChoices):
         PLANNED = "PLANNED", "Planned"
@@ -209,6 +215,7 @@ class DistributionEvent(models.Model):
         db_table = "core_distributionevent"
 
 
+# Connects an approved entitlement to its distribution event.
 class DistributionAllocation(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     household = models.ForeignKey(Household, on_delete=models.PROTECT, related_name="distribution_allocations", null=True, blank=True)
@@ -226,6 +233,7 @@ class DistributionAllocation(models.Model):
         db_table = "core_distributionallocation"
 
 
+# Stores the final delivery result and evidence for an allocation.
 class DistributionIssue(models.Model):
     class DeliveryStatus(models.TextChoices):
         RECEIVED = "RECEIVED", "Received"

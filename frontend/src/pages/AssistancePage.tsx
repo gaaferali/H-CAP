@@ -1,10 +1,9 @@
-import { FormEvent, ReactNode, useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import { api, listItems } from "../api/api";
-import type { PlatformUser } from "../api/api";
 import type { Entity, Role } from "../types/types";
-import { Badge, Field, FunctionHelp, Message, Panel, SelectField, Table, Textarea } from "../components";
-import { TranslateTree, useTranslation } from "../i18n";
-import { beneficiaryLabel, distributionEventLabel, enrollmentLabel, householdLabel, nfiBeneficiaryLabel, nfiEntitlementLabel, programLabel, readableCode, valueOf } from "../utils";
+import { Badge, Message, Panel, Table } from "../components";
+import { nfiBeneficiaryLabel, valueOf } from "../utils";
+// Shows the available cash, NFI, and medical delivery workspaces for this role.
 export function AssistancePage({ role }: { role: Role }) {
   const [cash, setCash] = useState<Entity[]>([]);
   const [nfi, setNfi] = useState<Entity[]>([]);
@@ -29,35 +28,6 @@ export function AssistancePage({ role }: { role: Role }) {
         reason instanceof Error
           ? reason.message
           : "Could not load assistance records.",
-      );
-    }
-  };
-  const [deliveryStatus, setDeliveryStatus] = useState("");
-  const [deliveryError, setDeliveryError] = useState("");
-  const recordDelivery = async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    const form = new FormData(event.currentTarget);
-    setDeliveryError("");
-    try {
-      await api.create("distribution-issues", {
-        household: form.get("household"),
-        beneficiary: form.get("beneficiary"),
-        entitlement: form.get("entitlement"),
-        item: form.get("item"),
-        event: form.get("event"),
-        planned_quantity: Number(form.get("planned_quantity")),
-        actual_quantity: Number(form.get("actual_quantity")),
-        delivery_status: form.get("delivery_status"),
-        notes: form.get("notes"),
-      });
-      await load();
-      setDeliveryStatus("saved");
-    } catch (reason) {
-      setDeliveryStatus("failed");
-      setDeliveryError(
-        reason instanceof Error
-          ? reason.message
-          : "Could not record delivery outcome.",
       );
     }
   };

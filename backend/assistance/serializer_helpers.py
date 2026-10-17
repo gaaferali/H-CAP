@@ -4,7 +4,7 @@ from django.db.models import Q
 from django.utils.crypto import salted_hmac
 from rest_framework import serializers
 
-from .models import Enrollment, HouseholdEnrollment
+from .models import Enrollment, HouseholdEnrollment, HouseholdModalityDecision
 
 
 def normalize_phone_number(value):
@@ -57,6 +57,14 @@ def household_member_details(household):
 def approved_household_modality(household, program, modality, include_legacy=True):
     if not household or household.program_id != program.id:
         return False
+    requested = {str(value) for value in modality}
+    if HouseholdModalityDecision.objects.filter(
+        household=household,
+        program=program,
+        status=HouseholdModalityDecision.Status.APPROVED,
+        modality__in=requested,
+    ).exists():
+        return True
     if HouseholdEnrollment.objects.filter(
         household=household,
         program=program,

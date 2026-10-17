@@ -37,6 +37,7 @@ from reporting.models import AuditEvent
 
 
 
+# Returns readable audit events while keeping the original before and after data.
 class AuditEventSerializer(serializers.ModelSerializer):
     actor_name = serializers.CharField(source="actor.full_name", read_only=True)
 
